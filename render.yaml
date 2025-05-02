@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: dataklinik-bot
+    env: python
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python main.py"
+    envVars:
+      - key: TELEGRAM_TOKEN
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+    plan: free
+    autoDeploy: true
+    region: oregon
+    # ⬇⬇⬇ ВАЖНО: Пропиши порт!
+    ports:
+      - port: 10000
