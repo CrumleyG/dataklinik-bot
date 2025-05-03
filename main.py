@@ -57,11 +57,10 @@ def main():
     print(f"🔗 Webhook URL: {webhook_url}")
 
     app.run_webhook(
-        listen="0.0.0.0",
-        port=int(os.environ.get("PORT", 10000)),
-        webhook_url=webhook_url,
-        path="/webhook"
-    )
+    listen="0.0.0.0",
+    port=int(os.environ.get("PORT", 10000)),
+    webhook_url=webhook_url
+)
 
 if __name__ == "__main__":
     main()
