@@ -1,4 +1,5 @@
 import os
+import requests
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import (
@@ -9,51 +10,65 @@ from telegram.ext import (
 )
 from openai import OpenAI
 
-# 1. Загрузка переменных из .env (или из Render ENV)
+# Загрузка переменных
 load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 RENDER_URL = os.getenv("RENDER_EXTERNAL_URL")
 PORT = int(os.getenv("PORT", 10000))
 
-if not TELEGRAM_TOKEN or not OPENAI_API_KEY:
-    raise RuntimeError("Не заданы TELEGRAM_TOKEN или OPENAI_API_KEY")
+AIRTABLE_TOKEN = os.getenv("AIRTABLE_TOKEN")
+AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
+AIRTABLE_TABLE_NAME = os.getenv("AIRTABLE_TABLE_NAME")
 
-# 2. Инициализация OpenAI
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# 3. Обработчик сообщений с памятью последних 10 запросов
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    history = context.user_data.get("history", [])
-    history.append({"role": "user", "content": update.message.text})
-
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "Ты ассистент клиники. Помоги человеку записаться: "
-                "уточни услугу, дату и время. Веди себя дружелюбно."
-            ),
+# Функция добавления записи в Airtable
+def add_to_airtable(user_id, question, answer):
+    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{AIRTABLE_TABLE_NAME}"
+    headers = {
+        "Authorization": f"Bearer {AIRTABLE_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    data = {
+        "fields": {
+            "User ID": str(user_id),
+            "Question": question,
+            "Answer": answer
         }
-    ] + history
+    }
+    response = requests.post(url, headers=headers, json=data)
+    if response.status_code != 200:
+        print(f"❌ Ошибка записи в Airtable: {response.text}")
+
+# Обработчик сообщений
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_message = update.message.text
+    history = context.user_data.get("history", [])
+    history.append({"role": "user", "content": user_message})
+
+    messages = [{"role": "system", "content": "Ты ассистент клиники. Помоги человеку записаться: уточни услугу, дату и время. Будь дружелюбен."}] + history
 
     try:
-        resp = client.chat.completions.create(
+        response = client.chat.completions.create(
             model="gpt-4o",
             messages=messages
         )
-        reply = resp.choices[0].message.content
-
+        reply = response.choices[0].message.content
         history.append({"role": "assistant", "content": reply})
-        context.user_data["history"] = history[-10:]
+        context.user_data["history"] = history[-20:]
+
+        # запись в Airtable
+        add_to_airtable(user_id, user_message, reply)
 
         await update.message.reply_text(reply)
 
     except Exception as e:
-        print("❌ Ошибка в handle_message:", e)
-        await update.message.reply_text("Произошла внутренняя ошибка, смотрите логи.")
+        print(f"❌ Ошибка в handle_message: {e}")
+        await update.message.reply_text("Произошла внутренняя ошибка. Проверь логи.")
 
-# 4. Запуск webhook-сервера
+# Webhook запуск
 def main():
     print("🚀 Запускаем Telegram-бота через Webhook…")
 
@@ -63,18 +78,15 @@ def main():
     if not RENDER_URL:
         raise RuntimeError("RENDER_EXTERNAL_URL не установлен")
 
-    # если RENDER_URL пришёл без протокола — дополним
     if not RENDER_URL.startswith("http"):
         external = "https://" + RENDER_URL
     else:
         external = RENDER_URL
 
-    # path и полный URL webhook-а
     url_path = "webhook"
     webhook_url = f"{external}/{url_path}"
     print("🔗 Устанавливаем webhook:", webhook_url)
 
-    # Запускаем сервер, Telegram сам вызовет этот путь
     app.run_webhook(
         listen="0.0.0.0",
         port=PORT,
