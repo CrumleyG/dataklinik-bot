@@ -5,11 +5,9 @@ services:
     buildCommand: "pip install -r requirements.txt"
     startCommand: "python main.py"
     envVars:
-      - key: TELEGRAM_TOKEN
-        sync: false
-      - key: OPENAI_API_KEY
-        sync: false
-    plan: starter      # или любой платный/ Starter для zero-downtime
+      - key: TELEGRAM_TOKEN;     sync: false
+      - key: OPENAI_API_KEY;      sync: false
+    plan: starter
     autoDeploy: true
     region: oregon
     ports:
