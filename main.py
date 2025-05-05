@@ -2,37 +2,37 @@ import os
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import (
-    ApplicationBuilder, ContextTypes, MessageHandler, filters
+    ApplicationBuilder,
+    ContextTypes,
+    MessageHandler,
+    filters,
 )
 from openai import OpenAI
 
-# ——————————————
-# 1. Загрузка конфигов
-# ——————————————
+# 1) Загрузка .env (если ты пушишь .env.example, а настоящие ключи держишь в Dashboard)
 load_dotenv()
+
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-OPENAI_API_KEY  = os.getenv("OPENAI_API_KEY")
-PORT            = int(os.getenv("PORT", 10000))
-RENDER_URL      = os.getenv("RENDER_EXTERNAL_URL")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+RENDER_URL = os.getenv("RENDER_EXTERNAL_URL")
+PORT = int(os.getenv("PORT", 10000))
 
 if not TELEGRAM_TOKEN or not OPENAI_API_KEY:
-    raise RuntimeError("Не найдены TELEGRAM_TOKEN или OPENAI_API_KEY в окружении")
+    raise RuntimeError("Не задан TELEGRAM_TOKEN или OPENAI_API_KEY")
 
-# ——————————————
-# 2. Клиенты OpenAI и Telegram
-# ——————————————
+# 2) Инициализируем OpenAI-клиент
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# ——————————————
-# 3. Хендлер с памятью (последние 10 сообщений)
-# ——————————————
+# 3) Обработчик — сохраняем историю в context.user_data["history"]
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
     history = context.user_data.get("history", [])
     history.append({"role": "user", "content": update.message.text})
 
     messages = [
-        {"role": "system", "content": "Ты ассистент стоматологической клиники. Помоги человеку записаться: уточни услугу, дату и время. Будь дружелюбен. Используй навыки дополнительных продаж."}
+        {"role": "system", "content": (
+            "Ты ассистент клиники. Помоги человеку записаться: "
+            "уточни услугу, дату и время. Веди себя дружелюбно."
+        )}
     ] + history
 
     try:
@@ -41,44 +41,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             messages=messages
         )
         reply = resp.choices[0].message.content
-
         history.append({"role": "assistant", "content": reply})
-        context.user_data["history"] = history[-10:]  # храним только последние 10
-
+        # храним только последние 10
+        context.user_data["history"] = history[-10:]
         await update.message.reply_text(reply)
 
     except Exception as e:
         print("❌ Ошибка в handle_message:", e)
-        await update.message.reply_text("Произошла внутренняя ошибка. Проверь логи.")
+        await update.message.reply_text("Произошла внутренняя ошибка, проверь логи.")
 
-# ——————————————
-# 4. Настройка webhook и HTTP-сервера aiohttp
-# ——————————————
-async def main():
+# 4) Запуск Webhook-сервера (синхронно, без asyncio.run)
+def main():
     print("🚀 Запускаем Telegram-бота через Webhook…")
 
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # URL, по которому Render будет пингануть ваш бот
-    if not RENDER_URL:
-        raise RuntimeError("RENDER_EXTERNAL_URL не установлен в окружении")
+    webhook_url = f"{RENDER_URL}/webhook"
+    print("🔗 Устанавливаем webhook:", webhook_url)
+    app.bot.set_webhook(webhook_url)
 
-    webhook_path = "/webhook"
-    webhook_url  = f"{RENDER_URL}{webhook_path}"
-
-    # Регистрируем webhook у Telegram
-    await app.bot.set_webhook(webhook_url)
-    print("🔗 Установлен webhook на", webhook_url)
-
-    # Запускаем встроенный сервер aiohttp
-    # в python-telegram-bot[webhooks] он автоматически стартует
+    # сюда Render направит все POST /webhook
     app.run_webhook(
         listen="0.0.0.0",
         port=PORT,
-        url_path=webhook_path
     )
 
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+    main()
