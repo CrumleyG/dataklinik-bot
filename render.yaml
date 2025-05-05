@@ -2,17 +2,15 @@ services:
   - type: web
     name: dataklinik-bot
     env: python
-    plan: free        # или ваш платный план
+    region: oregon
+    plan: starter          # или платный, чтобы не засыпал после простоя
+    autoDeploy: true
     buildCommand: "pip install -r requirements.txt"
     startCommand: "python main.py"
-    autoDeploy: true
-    region: oregon
-
     envVars:
       - key: TELEGRAM_TOKEN
         sync: false
       - key: OPENAI_API_KEY
         sync: false
-
     ports:
       - port: 10000
