@@ -19,7 +19,7 @@ RENDER_URL = os.getenv("RENDER_EXTERNAL_URL")
 PORT = int(os.getenv("PORT", 10000))
 
 if not all([TELEGRAM_TOKEN, OPENAI_API_KEY, AIRTABLE_TOKEN, AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME, RENDER_URL]):
-    raise RuntimeError("Нужно задать все ENV")
+    raise RuntimeError("Нужно задать все ENV: TELEGRAM_TOKEN, OPENAI_API_KEY, AIRTABLE_TOKEN, AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME, RENDER_EXTERNAL_URL")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
@@ -29,7 +29,7 @@ AIRTABLE_HEADERS = {
     "Content-Type": "application/json"
 }
 
-# Вытаскиваем данные из текста
+# Извлечение полей из текста
 def extract_fields(text):
     name_match = re.search(r"(?:меня зовут|я|имя)\s*([А-Яа-яЁё]+)", text, re.IGNORECASE)
     service_match = re.search(r"(?:на|хочу|записаться на)\s+([а-яА-ЯёЁ\s]+?)(?:\s+на\s+|\s+в\s+|\s+|$)", text)
@@ -53,9 +53,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     messages = [{
         "role": "system",
         "content": (
-            "Ты — ассистент стоматологической клиники. Говори от женского лица, веди себя дружелюбно и уверенно. "
-            "Записывай клиента на услугу. Уточняй имя, услугу, дату и время. "
-            "Люди могут писать свободно. Когда всё будет, подтверди запись."
+            "Ты — ассистент стоматологической клиники. Говори от женского лица, веди себя вежливо и уверенно. "
+            "Помоги человеку записаться: уточни услугу, имя, дату и время. Люди могут писать в свободной форме."
         )
     }] + history[-30:]
 
@@ -70,36 +69,38 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await update.message.reply_text(reply)
 
+        # Извлечение данных
         name, service, date_str, time_str = extract_fields(user_input + reply)
+        print(f"🔍 Извлечено: name={name}, service={service}, date={date_str}, time={time_str}")
 
-        if all([name, service, date_str, time_str]):
-            dt_full = f"{date_str} {time_str}"
-            data = {
-                "fields": {
-                    "Имя": name,
-                    "Фамилия": update.effective_user.last_name or "",
-                    "Username": update.effective_user.username or "",
-                    "Chat ID": update.effective_user.id,
-                    "Услуга": service,
-                    "Дата и время записи": dt_full,
-                    "Сообщение": user_input,
-                    "Дата и время заявки": datetime.now().isoformat()
-                }
+        # Пишем всё в Airtable, даже если не все поля есть
+        dt_full = f"{date_str or '—'} {time_str or '—'}"
+        data = {
+            "fields": {
+                "Имя": name or "—",
+                "Фамилия": update.effective_user.last_name or "",
+                "Username": update.effective_user.username or "",
+                "Chat ID": update.effective_user.id,
+                "Услуга": service or "—",
+                "Дата и время записи": dt_full,
+                "Сообщение": user_input,
+                "Дата и время заявки": datetime.now().isoformat()
             }
+        }
 
-            airtable_response = requests.post(AIRTABLE_URL, headers=AIRTABLE_HEADERS, json=data)
-            print("📤 Запрос в Airtable:", airtable_response.status_code, airtable_response.text)
+        airtable_response = requests.post(AIRTABLE_URL, headers=AIRTABLE_HEADERS, json=data)
+        print("📤 Airtable response:", airtable_response.status_code, airtable_response.text)
 
-            if airtable_response.status_code == 200 or airtable_response.status_code == 201:
-                await update.message.reply_text(f"✅ Записала: {name}, {service}, {dt_full}. До встречи!")
-            else:
-                await update.message.reply_text("⚠️ Не удалось записать в таблицу. Проверьте логи.")
+        if airtable_response.status_code in [200, 201]:
+            await update.message.reply_text("📝 Клиент успешно записан.")
+        else:
+            await update.message.reply_text("⚠️ Ошибка при записи в таблицу. Проверь логи.")
 
     except Exception as e:
         print("❌ Ошибка:", e)
         await update.message.reply_text("Произошла ошибка. Попробуйте ещё раз позже.")
 
-# Основной запуск
+# Запуск бота
 def main():
     print("🚀 Запуск Telegram-бота через Webhook…")
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
