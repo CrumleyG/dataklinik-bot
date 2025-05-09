@@ -90,7 +90,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "Дата и время заявки": datetime.now().isoformat()
                 }
             }
-            response = requests.post(AIRTABLE_URL, headers=AIRTABLE_HEADERS, json=data)
+            res = requests.post(AIRTABLE_URL, headers=AIRTABLE_HEADERS, json=data)
+            print(f"📤 Airtable response: {res.status_code} — {res.text}")
             if response.status_code in [200, 201]:
                 await update.message.reply_text(f"🌸 Записала: {name}, {service} — {dt_full}. До встречи в клинике!")
             else:
