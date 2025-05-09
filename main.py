@@ -7,6 +7,7 @@ from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filte
 from openai import OpenAI
 from datetime import datetime
 
+# Загрузка переменных окружения
 load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -28,7 +29,7 @@ AIRTABLE_HEADERS = {
     "Content-Type": "application/json"
 }
 
-# Функция для извлечения полей из ответа GPT
+# Функция для извлечения данных из текста
 def extract_fields(text):
     name_match = re.search(r"(?:меня зовут|я|имя)\s*([А-Яа-яЁё]+)", text, re.IGNORECASE)
     service_match = re.search(r"(?:на|хочу|записаться на)\s+([а-яА-ЯёЁ\s]+?)(?:\s+на\s+|\s+в\s+|\s+|$)", text)
@@ -41,6 +42,7 @@ def extract_fields(text):
 
     return name, service, date_str, time_str
 
+# Обработка сообщений
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_input = update.message.text
     user_data = context.user_data
@@ -52,24 +54,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         {
             "role": "system",
             "content": (
-                "Ты — ассистент стоматологической клиники. Веди диалог вежливо. "
-                "Записывай клиента на услугу. Тебе нужно узнать имя, услугу, дату и время."
-                " Клиенты могут писать в свободной форме. Извлекай нужные данные и подтверждай запись."
+                "Ты — девушка-ассистент стоматологической клиники. Говори мягко, вежливо, дружелюбно. "
+                "Твоя цель — помочь клиенту записаться на услугу. "
+                "Уточни имя, услугу, дату и время, если они ещё не указаны. "
+                "Клиенты могут писать свободно, ты должна понимать и уточнять."
             )
         }
-    ] + history[-10:]
+    ] + history[-50:]
 
     try:
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=messages
         )
-        reply = response.choices[0].message.content
+        reply = response.choices[0].message.content.strip()
         history.append({"role": "assistant", "content": reply})
-        user_data["history"] = history[-30:]
+        user_data["history"] = history[-50:]
 
         await update.message.reply_text(reply)
 
+        # Попробуем вытащить данные
         name, service, date_str, time_str = extract_fields(user_input + reply)
 
         if all([name, service, date_str, time_str]):
@@ -86,13 +90,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "Дата и время заявки": datetime.now().isoformat()
                 }
             }
-            requests.post(AIRTABLE_URL, headers=AIRTABLE_HEADERS, json=data)
-            await update.message.reply_text(f"✅ Записал: {name}, {service}, {dt_full}. До встречи!")
+            response = requests.post(AIRTABLE_URL, headers=AIRTABLE_HEADERS, json=data)
+            if response.status_code in [200, 201]:
+                await update.message.reply_text(f"🌸 Записала: {name}, {service} — {dt_full}. До встречи в клинике!")
+            else:
+                print("⚠️ Airtable response:", response.text)
 
     except Exception as e:
         print("❌ Ошибка:", e)
-        await update.message.reply_text("Произошла ошибка. Попробуйте ещё раз позже.")
+        await update.message.reply_text("Ой! Что-то пошло не так, пожалуйста, попробуйте чуть позже.")
 
+# Запуск бота через Webhook
 def main():
     print("🚀 Запуск Telegram-бота через Webhook…")
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
@@ -117,4 +125,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
