@@ -1,3 +1,4 @@
+# main.py
 import os
 import re
 import requests
@@ -12,18 +13,21 @@ from telegram.ext import (
 from openai import OpenAI
 from datetime import datetime, timedelta
 
-# 1. Загрузка ENV
+# 1. Загрузка ENV и strip()
 load_dotenv()
-TELEGRAM_TOKEN      = os.getenv("TELEGRAM_TOKEN")
-OPENAI_API_KEY      = os.getenv("OPENAI_API_KEY")
-AIRTABLE_TOKEN      = os.getenv("AIRTABLE_TOKEN")
-AIRTABLE_BASE_ID    = os.getenv("AIRTABLE_BASE_ID")
-AIRTABLE_TABLE_NAME = os.getenv("AIRTABLE_TABLE_NAME")
-RENDER_URL          = os.getenv("RENDER_EXTERNAL_URL")
-PORT                = int(os.getenv("PORT", 10000))
+TELEGRAM_TOKEN      = os.getenv("TELEGRAM_TOKEN", "").strip()
+OPENAI_API_KEY      = os.getenv("OPENAI_API_KEY", "").strip()
+AIRTABLE_TOKEN      = os.getenv("AIRTABLE_TOKEN", "").strip()
+AIRTABLE_BASE_ID    = os.getenv("AIRTABLE_BASE_ID", "").strip()
+AIRTABLE_TABLE_NAME = os.getenv("AIRTABLE_TABLE_NAME", "").strip()
+RENDER_URL          = os.getenv("RENDER_EXTERNAL_URL", "").strip()
+PORT                = int(os.getenv("PORT", "10000").strip())
 
 if not all([TELEGRAM_TOKEN, OPENAI_API_KEY, AIRTABLE_TOKEN, AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME, RENDER_URL]):
-    raise RuntimeError("Нужно задать все ENV: TELEGRAM_TOKEN, OPENAI_API_KEY, AIRTABLE_TOKEN, AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME, RENDER_EXTERNAL_URL")
+    raise RuntimeError(
+        "Нужно задать все ENV: TELEGRAM_TOKEN, OPENAI_API_KEY, "
+        "AIRTABLE_TOKEN, AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME, RENDER_EXTERNAL_URL"
+    )
 
 # 2. Клиенты
 openai = OpenAI(api_key=OPENAI_API_KEY)
@@ -33,15 +37,17 @@ AIRTABLE_HEADERS = {
     "Content-Type": "application/json"
 }
 
-# 3. Извлечение полей
+# 3. Извлечение полей (имя, услуга, дата, время, телефон)
 def extract_fields(text: str):
     m_name = re.search(r'(?:меня зовут|зовут|я)\s*([А-ЯЁ][а-яё]+)', text, re.IGNORECASE)
     m_serv = re.search(r'(?:на процедуру|на|хочу)\s+([а-яё\s]+?)(?=\s*(?:в|завтра|\d|\.)|$)', text, re.IGNORECASE)
-    m_dt = re.search(
+    m_dt   = re.search(
         r'(?:(\d{1,2}[.\-/]\d{1,2}[.\-/]\d{2,4})|(?:завтра|послезавтра))'
         r'(?:\s*в\s*)(\d{1,2}:\d{2})',
         text, re.IGNORECASE
     )
+    m_phone = re.search(r'(\+?\d{7,15})', text)
+
     name    = m_name.group(1).capitalize() if m_name else None
     service = m_serv.group(1).strip()      if m_serv else None
 
@@ -55,7 +61,9 @@ def extract_fields(text: str):
             date_raw = (datetime.now() + timedelta(days=days)).strftime("%d.%m.%Y")
         time_raw = m_dt.group(2)
 
-    return name, service, date_raw, time_raw
+    phone = m_phone.group(1) if m_phone else None
+
+    return name, service, date_raw, time_raw, phone
 
 # 4. Хендлер
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -69,11 +77,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # форма
     form = user_data.get("form", {})
-    n, s, d, t = extract_fields(text)
+    n, s, d, t, p = extract_fields(text)
     if n: form["name"]     = n
     if s: form["service"]  = s
     if d: form["date"]     = d
     if t: form["time"]     = t
+    if p: form["phone"]    = p
     user_data["form"] = form
 
     # GPT-запрос
@@ -82,7 +91,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "role": "system",
             "content": (
                 "Вы — помощница стоматологической клиники. Говорите от женского лица, "
-                "вежливо и понятно. Ваша задача — записать клиента: узнать имя, услугу, дату и время. "
+                "вежливо и понятно. Ваша задача — записать клиента: узнать имя, услугу, дату, время и телефон. "
                 "Если каких-то данных не хватает — спросите."
             )
         }
@@ -104,17 +113,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # если форма полная — пишем в Airtable
     form = user_data["form"]
     print("🔍 Текущая форма:", form)
-    if all(k in form for k in ("name", "service", "date", "time")):
+    required = ("name", "service", "date", "time", "phone")
+    if all(k in form for k in required):
         dt_full = f"{form['date']} {form['time']}"
         payload = {
             "fields": {
-                "Имя": form["name"],
-                "Фамилия": update.effective_user.last_name or "",
-                "Username": update.effective_user.username or "",
-                "Chat ID": update.effective_user.id,
-                "Услуга": form["service"],
-                "Дата и время записи": dt_full,
-                "Дата и время заявки": datetime.now().isoformat()
+                "Дата записи":        form["date"],
+                "Время":             form["time"],
+                "Услуга":            form["service"],
+                "Клиент":            form["name"],
+                "Телефон":           form["phone"],
+                "Статус":            "Новая",
             }
         }
         print("▶️ POST Airtable:", AIRTABLE_URL, payload)
@@ -139,14 +148,14 @@ def main():
 
     external = RENDER_URL if RENDER_URL.startswith("http") else "https://" + RENDER_URL
     webhook_url = f"{external}/webhook"
-    print("🔗 Webhook:", webhook_url)
+    print("🔗 Webhook установлен на:", webhook_url)
 
     app.run_webhook(
         listen="0.0.0.0",
         port=PORT,
         url_path="webhook",
         webhook_url=webhook_url,
-        drop_pending_updates=True,  # оставляем только один раз
+        drop_pending_updates=True,  # один раз
     )
 
 if __name__ == "__main__":
