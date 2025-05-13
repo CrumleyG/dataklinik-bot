@@ -9,7 +9,7 @@ from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filte
 from openai import OpenAI
 from datetime import datetime, timedelta
 
-# Загрузка переменных
+# Загрузка переменных окружения
 load_dotenv()
 TELEGRAM_TOKEN      = os.getenv("TELEGRAM_TOKEN", "").strip()
 OPENAI_API_KEY      = os.getenv("OPENAI_API_KEY", "").strip()
@@ -23,7 +23,7 @@ SERVICES_TABLE_ID   = "tbllp4WUVCDXrCjrP"  # ID таблицы "Услуги"
 if not all([TELEGRAM_TOKEN, OPENAI_API_KEY, AIRTABLE_TOKEN, AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME, RENDER_URL]):
     raise RuntimeError("❌ ENV-переменные не заданы")
 
-# Клиенты
+# Инициализация клиентов
 openai = OpenAI(api_key=OPENAI_API_KEY)
 HEADERS = {"Authorization": f"Bearer {AIRTABLE_TOKEN}", "Content-Type": "application/json"}
 
@@ -33,9 +33,10 @@ SERVICE_SYNONYMS = {
     "осмотр": "Профилактический осмотр",
     "профосмотр": "Профилактический осмотр",
     "лечение": "Терапия",
+    "чистка зубов": "Чистка зубов"
 }
 
-# Парсинг
+# Парсинг данных из текста
 def extract_fields(text):
     name  = re.search(r'(?:зовут|меня зовут|я)\s*([А-ЯЁ][а-яё]+)', text, re.IGNORECASE)
     serv  = re.search(r'(?:на|хочу)\s+([а-яё\s]+?)(?=\s*(?:в|\d|\.)|$)', text, re.IGNORECASE)
@@ -59,7 +60,7 @@ def extract_fields(text):
 
     return name, serv, date, time_, phone.group(1) if phone else None
 
-# Найти ID услуги
+# Поиск ID услуги в Airtable
 def find_service_id(service_name):
     print(f"🌐 Ищем услугу в Airtable: {service_name}")
     params = {"filterByFormula": f"{{Название}}='{service_name}'"}
@@ -75,10 +76,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     user_data = context.user_data
 
+    # Тестовая вставка
     if text.strip().lower() == "тест запись":
         context.user_data["form"] = {
             "name": "Тестов",
-            "service": "Профилактический осмотр",  # ← используй точное название из Airtable
+            "service": "Чистка зубов",  # ← точное название из Airtable
             "date": "15.05.2025",
             "time": "14:00",
             "phone": "+77001112233"
@@ -101,7 +103,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     print("📋 Формуляр:", form)
 
-    # GPT ответ
     try:
         messages = [{"role": "system", "content": "Вы — помощница стоматологии. Записывайте клиента: имя, услуга, дата, время, телефон. Если чего-то не хватает — спросите."}] + history[-10:]
         response = openai.chat.completions.create(model="gpt-4o", messages=messages)
@@ -112,7 +113,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         print("❌ GPT Error:", e)
         return await update.message.reply_text("Ошибка OpenAI")
 
-    # Если всё есть — создаём запись
     form = user_data["form"]
     if all(k in form for k in ("name", "service", "date", "time", "phone")):
         print("✅ Все поля есть, ищем ID услуги:", form["service"])
@@ -146,10 +146,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         print("⏳ Ожидаем дополнительные данные от клиента.")
 
-# Запуск
+# Запуск бота
 def main():
     print("🚀 Бот стартует…")
 
+    # Принудительно открываем порт для Render
     sock = socket.socket()
     sock.bind(("0.0.0.0", PORT))
     sock.listen(1)
