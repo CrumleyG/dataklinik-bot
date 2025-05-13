@@ -4,176 +4,132 @@ import re
 import requests
 from dotenv import load_dotenv
 from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder,
-    ContextTypes,
-    MessageHandler,
-    filters,
-)
+from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
 from openai import OpenAI
 from datetime import datetime, timedelta
 
-# 1. Загрузка ENV
+# Загрузка переменных
 load_dotenv()
 TELEGRAM_TOKEN      = os.getenv("TELEGRAM_TOKEN", "").strip()
 OPENAI_API_KEY      = os.getenv("OPENAI_API_KEY", "").strip()
 AIRTABLE_TOKEN      = os.getenv("AIRTABLE_TOKEN", "").strip()
 AIRTABLE_BASE_ID    = os.getenv("AIRTABLE_BASE_ID", "").strip()
-AIRTABLE_TABLE_NAME = os.getenv("AIRTABLE_TABLE_NAME", "").strip()
+AIRTABLE_TABLE_NAME = os.getenv("AIRTABLE_TABLE_NAME", "").strip()  # tbl... таблица "Расписание"
 RENDER_URL          = os.getenv("RENDER_EXTERNAL_URL", "").strip()
 PORT                = int(os.getenv("PORT", "10000").strip())
+SERVICES_TABLE_ID   = "tbllp4WUVCDXrCjrP"  # 👈 сюда вставь ID таблицы "Услуги"
 
+# Проверка
 if not all([TELEGRAM_TOKEN, OPENAI_API_KEY, AIRTABLE_TOKEN, AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME, RENDER_URL]):
-    raise RuntimeError(
-        "Нужно задать все ENV: TELEGRAM_TOKEN, OPENAI_API_KEY, "
-        "AIRTABLE_TOKEN, AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME, RENDER_EXTERNAL_URL"
-    )
+    raise RuntimeError("❌ Отсутствуют ENV переменные")
 
-# 2. Клиенты
+# Клиенты
 openai = OpenAI(api_key=OPENAI_API_KEY)
-AIRTABLE_URL       = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{AIRTABLE_TABLE_NAME}"
-AIRTABLE_HEADERS   = {"Authorization": f"Bearer {AIRTABLE_TOKEN}", "Content-Type": "application/json"}
-SERVICES_TABLE_ID  = "Услуги"    # замените на фактический ID таблицы Услуги, например tblXYZ123
+HEADERS = {"Authorization": f"Bearer {AIRTABLE_TOKEN}", "Content-Type": "application/json"}
 
-def find_service_record_id(service_name: str) -> str | None:
-    """Ищет по имени услуги первую запись в таблице 'Услуги' и возвращает её record ID."""
-    params = {"filterByFormula": f"{{Name}}='{service_name}'"}
-    r = requests.get(
-        f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{SERVICES_TABLE_ID}",
-        headers=AIRTABLE_HEADERS,
-        params=params
-    )
-    if r.status_code == 200 and r.json().get("records"):
-        return r.json()["records"][0]["id"]
+# Парсинг данных из текста
+def extract_fields(text):
+    name  = re.search(r'(?:зовут|меня зовут|я)\s*([А-ЯЁ][а-яё]+)', text, re.IGNORECASE)
+    serv  = re.search(r'(?:на|хочу)\s+([а-яё\s]+?)(?=\s*(?:в|\d|\.)|$)', text, re.IGNORECASE)
+    dt    = re.search(r'(?:(\d{1,2}[.\-/]\d{1,2}[.\-/]\d{2,4})|завтра|послезавтра)\s*в\s*(\d{1,2}:\d{2})', text, re.IGNORECASE)
+    phone = re.search(r'(\+?\d{7,15})', text)
+
+    name = name.group(1).capitalize() if name else None
+    serv = serv.group(1).strip() if serv else None
+    date = None
+    if dt:
+        if dt.group(1):
+            date = dt.group(1)
+        else:
+            offset = 1 if "завтра" in dt.group(0).lower() else 2
+            date = (datetime.now() + timedelta(days=offset)).strftime("%d.%m.%Y")
+        time = dt.group(2)
+    else:
+        time = None
+
+    return name, serv, date, time, phone.group(1) if phone else None
+
+# Поиск ID услуги
+def find_service_id(service_name):
+    params = {"filterByFormula": f"{{Название}}='{service_name}'"}
+    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{SERVICES_TABLE_ID}"
+    res = requests.get(url, headers=HEADERS, params=params)
+    if res.status_code == 200 and res.json().get("records"):
+        return res.json()["records"][0]["id"]
     return None
 
-# 3. Извлечение полей (имя, услуга, дата, время, телефон)
-def extract_fields(text: str):
-    m_name  = re.search(r'(?:меня зовут|зовут|я)\s*([А-ЯЁ][а-яё]+)', text, re.IGNORECASE)
-    m_serv  = re.search(r'(?:на процедуру|на|хочу)\s+([а-яё\s]+?)(?=\s*(?:в|завтра|\d|\.)|$)', text, re.IGNORECASE)
-    m_dt    = re.search(
-        r'(?:(\d{1,2}[.\-/]\d{1,2}[.\-/]\d{2,4})|(?:завтра|послезавтра))'
-        r'(?:\s*в\s*)(\d{1,2}:\d{2})',
-        text, re.IGNORECASE
-    )
-    m_phone = re.search(r'(\+?\d{7,15})', text)
-
-    name    = m_name .group(1).capitalize() if m_name else None
-    service = m_serv .group(1).strip()      if m_serv else None
-
-    date_raw = None
-    time_raw = None
-    if m_dt:
-        if m_dt.group(1):
-            date_raw = m_dt.group(1)
-        else:
-            days     = 2 if "послезавтра" in m_dt.group(0).lower() else 1
-            date_raw = (datetime.now() + timedelta(days=days)).strftime("%d.%m.%Y")
-        time_raw = m_dt.group(2)
-
-    phone = m_phone.group(1) if m_phone else None
-
-    return name, service, date_raw, time_raw, phone
-
-# 4. Хендлер
+# Основной хендлер
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text      = update.message.text
+    text = update.message.text
     user_data = context.user_data
 
-    # —————————————————————— Обновляем историю и форму ——————————————————————
     history = user_data.get("history", [])
     history.append({"role": "user", "content": text})
     user_data["history"] = history[-30:]
 
     form = user_data.get("form", {})
-    n, s, d, t, p = extract_fields(text)
-    if n: form["name"]     = n
-    if s: form["service"]  = s
-    if d: form["date"]     = d
-    if t: form["time"]     = t
-    if p: form["phone"]    = p
+    name, serv, date, time, phone = extract_fields(text)
+    if name:  form["name"] = name
+    if serv:  form["service"] = serv
+    if date:  form["date"] = date
+    if time:  form["time"] = time
+    if phone: form["phone"] = phone
     user_data["form"] = form
 
-    # —————————————————————— Запрос в OpenAI ——————————————————————
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "Вы — помощница стоматологической клиники. Говорите от женского лица, "
-                "вежливо и понятно. Ваша задача — записать клиента: узнать имя, услугу, дату, время и телефон. "
-                "Если каких-то данных не хватает — спросите."
-            )
-        }
-    ] + history[-10:]
-
+    # GPT-4
     try:
-        resp  = openai.chat.completions.create(model="gpt-4o", messages=messages)
-        reply = resp.choices[0].message.content
+        messages = [{"role": "system", "content": "Вы — помощница стоматологии. Записывайте клиента: имя, услуга, дата, время, телефон. Если чего-то не хватает — спросите."}] + history[-10:]
+        response = openai.chat.completions.create(model="gpt-4o", messages=messages)
+        reply = response.choices[0].message.content
+        await update.message.reply_text(reply)
+        history.append({"role": "assistant", "content": reply})
     except Exception as e:
-        print("❌ OpenAI error:", e)
-        await update.message.reply_text("Произошла ошибка при обращении к OpenAI.")
-        return
+        print("❌ GPT Error:", e)
+        return await update.message.reply_text("Ошибка OpenAI")
 
-    # —————————————————————— Отправляем пользователю ——————————————————————
-    await update.message.reply_text(reply)
-    history.append({"role": "assistant", "content": reply})
-    user_data["history"] = history[-30:]
-
-    # —————————————————————— Если форма полная — создаём запись в Airtable ——————————————————————
+    # Если всё заполнено — создаём запись
     form = user_data["form"]
-    if all(k in form for k in ("name","service","date","time","phone")):
-        # 1) Найдём record_id услуги
-        service_id = find_service_record_id(form["service"])
+    if all(k in form for k in ("name", "service", "date", "time", "phone")):
+        service_id = find_service_id(form["service"])
         if not service_id:
-            return await update.message.reply_text(
-                "❌ Не нашла такую услугу в базе. Пожалуйста, уточните название."
-            )
-        dt_full = f"{form['date']} {form['time']}"
+            return await update.message.reply_text("❌ Услуга не найдена. Проверьте название.")
 
         payload = {
             "fields": {
-                # это ваш текстовый столбец — сохранит текст (обязательно добавьте его в схеме)
-                "ServiceText": form["service"],
-                # это связка в вашей схеме — передаём массив record ID
-                "Услуга": [service_id],
-                "Дата записи": form["date"],
-                "Время": form["time"],
                 "Клиент": form["name"],
                 "Телефон": form["phone"],
-                "Статус": "Новая",
+                "Дата записи": form["date"],
+                "Время": form["time"],
+                "Услуга": [service_id],
+                "Статус": "Новая"
             }
         }
 
-        print("▶️ POST Airtable:", AIRTABLE_URL, payload)
-        res = requests.post(AIRTABLE_URL, headers=AIRTABLE_HEADERS, json=payload)
-        print("📤 Airtable response:", res.status_code, res.text)
+        airtable_url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{AIRTABLE_TABLE_NAME}"
+        res = requests.post(airtable_url, headers=HEADERS, json=payload)
+        print("📤 Airtable:", res.status_code, res.text)
 
         if res.status_code in (200, 201):
-            await update.message.reply_text(
-                f"✅ Записала вас, {form['name']}, на {form['service']} в {dt_full}. Спасибо! До встречи."
-            )
+            await update.message.reply_text(f"✅ Вы записаны на {form['service']} {form['date']} в {form['time']}. До встречи!")
             user_data.pop("form")
         else:
-            await update.message.reply_text("⚠️ Ошибка при записи в таблицу. Проверьте лог.")
+            await update.message.reply_text("⚠️ Ошибка при записи в Airtable.")
     else:
-        print("⚠️ Недостаточно данных, ждём клиента.")
+        print("⏳ Ожидаем дополнительные данные от клиента.")
 
-# 5. Запуск
+# Запуск
 def main():
-    print("🚀 Запуск бота через Webhook…")
+    print("🚀 Бот стартует…")
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    external   = RENDER_URL if RENDER_URL.startswith("http") else "https://" + RENDER_URL
-    webhook_url = f"{external}/webhook"
-    print("🔗 Webhook установлен на:", webhook_url)
-
+    external = RENDER_URL if RENDER_URL.startswith("http") else "https://" + RENDER_URL
     app.run_webhook(
         listen="0.0.0.0",
         port=PORT,
         url_path="webhook",
-        webhook_url=webhook_url,
-        drop_pending_updates=True,   # только один раз
+        webhook_url=f"{external}/webhook",
+        drop_pending_updates=True
     )
 
 if __name__ == "__main__":
