@@ -58,10 +58,25 @@ def find_service_id(service_name):
         return res.json()["records"][0]["id"]
     return None
 
+# ... всё как у тебя до handle_message ...
+
 # Основной хендлер
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     user_data = context.user_data
+
+    # ——————————— ВРЕМЕННАЯ ТЕСТОВАЯ ВСТАВКА ———————————
+    if text.strip().lower() == "тест запись":
+        context.user_data["form"] = {
+            "name": "Тестов",
+            "service": "Чистка",  # ← убедись, что такая услуга есть в таблице "Услуги"
+            "date": "15.05.2025",
+            "time": "14:00",
+            "phone": "+77001112233"
+        }
+        await update.message.reply_text("🧪 Данные формы вставлены вручную для теста.")
+        text = "запиши"  # имитация сообщения для продолжения
+    # ————————————————————————————————————————————
 
     history = user_data.get("history", [])
     history.append({"role": "user", "content": text})
@@ -116,21 +131,3 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚠️ Ошибка при записи в Airtable.")
     else:
         print("⏳ Ожидаем дополнительные данные от клиента.")
-
-# Запуск
-def main():
-    print("🚀 Бот стартует…")
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    external = RENDER_URL if RENDER_URL.startswith("http") else "https://" + RENDER_URL
-    app.run_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        url_path="webhook",
-        webhook_url=f"{external}/webhook",
-        drop_pending_updates=True
-    )
-
-if __name__ == "__main__":
-    main()
