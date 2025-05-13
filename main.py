@@ -1,6 +1,7 @@
-# main.py
 import os
 import re
+import socket
+import asyncio
 import requests
 from dotenv import load_dotenv
 from telegram import Update
@@ -14,10 +15,10 @@ TELEGRAM_TOKEN      = os.getenv("TELEGRAM_TOKEN", "").strip()
 OPENAI_API_KEY      = os.getenv("OPENAI_API_KEY", "").strip()
 AIRTABLE_TOKEN      = os.getenv("AIRTABLE_TOKEN", "").strip()
 AIRTABLE_BASE_ID    = os.getenv("AIRTABLE_BASE_ID", "").strip()
-AIRTABLE_TABLE_NAME = os.getenv("AIRTABLE_TABLE_NAME", "").strip()  # tbl... таблица "Расписание"
+AIRTABLE_TABLE_NAME = os.getenv("AIRTABLE_TABLE_NAME", "").strip()  # таблица "Расписание"
 RENDER_URL          = os.getenv("RENDER_EXTERNAL_URL", "").strip()
 PORT                = int(os.getenv("PORT", "10000").strip())
-SERVICES_TABLE_ID   = "tbllp4WUVCDXrCjrP"  # 👈 сюда вставь ID таблицы "Услуги"
+SERVICES_TABLE_ID   = "tbllp4WUVCDXrCjrP"  # ID таблицы "Услуги"
 
 # Проверка
 if not all([TELEGRAM_TOKEN, OPENAI_API_KEY, AIRTABLE_TOKEN, AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME, RENDER_URL]):
@@ -58,25 +59,22 @@ def find_service_id(service_name):
         return res.json()["records"][0]["id"]
     return None
 
-# ... всё как у тебя до handle_message ...
-
 # Основной хендлер
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     user_data = context.user_data
 
-    # ——————————— ВРЕМЕННАЯ ТЕСТОВАЯ ВСТАВКА ———————————
+    # 🔧 Тестовая команда
     if text.strip().lower() == "тест запись":
         context.user_data["form"] = {
             "name": "Тестов",
-            "service": "Чистка",  # ← убедись, что такая услуга есть в таблице "Услуги"
+            "service": "Чистка",  # ← убедись, что такая услуга есть
             "date": "15.05.2025",
             "time": "14:00",
             "phone": "+77001112233"
         }
         await update.message.reply_text("🧪 Данные формы вставлены вручную для теста.")
-        text = "запиши"  # имитация сообщения для продолжения
-    # ————————————————————————————————————————————
+        text = "запиши"  # имитируем продолжение диалога
 
     history = user_data.get("history", [])
     history.append({"role": "user", "content": text})
@@ -91,7 +89,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if phone: form["phone"] = phone
     user_data["form"] = form
 
-    # GPT-4
+    # GPT-4 ответ
     try:
         messages = [{"role": "system", "content": "Вы — помощница стоматологии. Записывайте клиента: имя, услуга, дата, время, телефон. Если чего-то не хватает — спросите."}] + history[-10:]
         response = openai.chat.completions.create(model="gpt-4o", messages=messages)
@@ -102,7 +100,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         print("❌ GPT Error:", e)
         return await update.message.reply_text("Ошибка OpenAI")
 
-    # Если всё заполнено — создаём запись
+    # Запись в Airtable
     form = user_data["form"]
     if all(k in form for k in ("name", "service", "date", "time", "phone")):
         service_id = find_service_id(form["service"])
@@ -131,3 +129,32 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚠️ Ошибка при записи в Airtable.")
     else:
         print("⏳ Ожидаем дополнительные данные от клиента.")
+
+# Запуск
+def main():
+    print("🚀 Бот стартует…")
+
+    # Принудительно "связываем" порт для Render
+    sock = socket.socket()
+    sock.bind(("0.0.0.0", PORT))
+    sock.listen(1)
+    sock.close()
+    asyncio.sleep(1)
+
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    external = RENDER_URL if RENDER_URL.startswith("http") else "https://" + RENDER_URL
+    webhook_url = f"{external}/webhook"
+    print("🔗 Webhook установлен на:", webhook_url)
+
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path="webhook",
+        webhook_url=webhook_url,
+        drop_pending_updates=True
+    )
+
+if __name__ == "__main__":
+    main()
