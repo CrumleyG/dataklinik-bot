@@ -28,7 +28,7 @@ if not all([TELEGRAM_TOKEN, OPENAI_API_KEY, AIRTABLE_TOKEN, AIRTABLE_BASE_ID, AI
 openai = OpenAI(api_key=OPENAI_API_KEY)
 HEADERS = {"Authorization": f"Bearer {AIRTABLE_TOKEN}", "Content-Type": "application/json"}
 
-# Парсинг данных из текста
+# Парсинг данных
 def extract_fields(text):
     name  = re.search(r'(?:зовут|меня зовут|я)\s*([А-ЯЁ][а-яё]+)', text, re.IGNORECASE)
     serv  = re.search(r'(?:на|хочу)\s+([а-яё\s]+?)(?=\s*(?:в|\d|\.)|$)', text, re.IGNORECASE)
@@ -52,9 +52,11 @@ def extract_fields(text):
 
 # Поиск ID услуги
 def find_service_id(service_name):
+    print(f"🌐 Ищем услугу в Airtable: {service_name}")
     params = {"filterByFormula": f"{{Название}}='{service_name}'"}
     url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{SERVICES_TABLE_ID}"
     res = requests.get(url, headers=HEADERS, params=params)
+    print("📥 Ответ от Airtable (услуги):", res.status_code, res.text)
     if res.status_code == 200 and res.json().get("records"):
         return res.json()["records"][0]["id"]
     return None
@@ -64,17 +66,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     user_data = context.user_data
 
-    # 🔧 Тестовая команда
     if text.strip().lower() == "тест запись":
         context.user_data["form"] = {
             "name": "Тестов",
-            "service": "Чистка",  # ← убедись, что такая услуга есть
+            "service": "Чистка",
             "date": "15.05.2025",
             "time": "14:00",
             "phone": "+77001112233"
         }
         await update.message.reply_text("🧪 Данные формы вставлены вручную для теста.")
-        text = "запиши"  # имитируем продолжение диалога
+        text = "запиши"
 
     history = user_data.get("history", [])
     history.append({"role": "user", "content": text})
@@ -89,7 +90,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if phone: form["phone"] = phone
     user_data["form"] = form
 
-    # GPT-4 ответ
+    print("📋 Формуляр:", form)
+
     try:
         messages = [{"role": "system", "content": "Вы — помощница стоматологии. Записывайте клиента: имя, услуга, дата, время, телефон. Если чего-то не хватает — спросите."}] + history[-10:]
         response = openai.chat.completions.create(model="gpt-4o", messages=messages)
@@ -100,11 +102,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         print("❌ GPT Error:", e)
         return await update.message.reply_text("Ошибка OpenAI")
 
-    # Запись в Airtable
     form = user_data["form"]
     if all(k in form for k in ("name", "service", "date", "time", "phone")):
+        print("✅ Все поля есть, ищем ID услуги:", form["service"])
         service_id = find_service_id(form["service"])
+        print("🔍 Найденный ID:", service_id)
+
         if not service_id:
+            print("❌ Не найден ID услуги в Airtable.")
             return await update.message.reply_text("❌ Услуга не найдена. Проверьте название.")
 
         payload = {
@@ -134,7 +139,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     print("🚀 Бот стартует…")
 
-    # Принудительно "связываем" порт для Render
+    # Принудительно открываем порт для Render
     sock = socket.socket()
     sock.bind(("0.0.0.0", PORT))
     sock.listen(1)
