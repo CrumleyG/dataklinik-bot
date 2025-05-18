@@ -18,12 +18,11 @@ AIRTABLE_BASE_ID    = os.getenv("AIRTABLE_BASE_ID", "").strip()
 AIRTABLE_TABLE_NAME = os.getenv("AIRTABLE_TABLE_NAME", "").strip()
 RENDER_URL          = os.getenv("RENDER_EXTERNAL_URL", "").strip()
 PORT                = int(os.getenv("PORT", "10000").strip())
-SERVICES_TABLE_ID   = "tbllp4WUVCDXrCjrP"  # ID таблицы "Услуги"
 
 if not all([TELEGRAM_TOKEN, OPENAI_API_KEY, AIRTABLE_TOKEN, AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME, RENDER_URL]):
     raise RuntimeError("❌ ENV-переменные не заданы")
 
-# Инициализация клиентов
+# Клиенты
 openai = OpenAI(api_key=OPENAI_API_KEY)
 HEADERS = {"Authorization": f"Bearer {AIRTABLE_TOKEN}", "Content-Type": "application/json"}
 
@@ -36,7 +35,7 @@ SERVICE_SYNONYMS = {
     "чистка зубов": "Чистка зубов"
 }
 
-# Парсинг данных из текста
+# Парсинг данных
 def extract_fields(text):
     name  = re.search(r'(?:зовут|меня зовут|я)\s*([А-ЯЁ][а-яё]+)', text, re.IGNORECASE)
     serv  = re.search(r'(?:на|хочу)\s+([а-яё\s]+?)(?=\s*(?:в|\d|\.)|$)', text, re.IGNORECASE)
@@ -60,17 +59,6 @@ def extract_fields(text):
 
     return name, serv, date, time_, phone.group(1) if phone else None
 
-# Поиск ID услуги в Airtable
-def find_service_id(service_name):
-    print(f"🌐 Ищем услугу в Airtable: {service_name}")
-    params = {"filterByFormula": f"{{Название}}='{service_name}'"}
-    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{SERVICES_TABLE_ID}"
-    res = requests.get(url, headers=HEADERS, params=params)
-    print("📥 Ответ от Airtable (услуги):", res.status_code, res.text)
-    if res.status_code == 200 and res.json().get("records"):
-        return res.json()["records"][0]["id"]
-    return None
-
 # Хендлер сообщений
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
@@ -80,7 +68,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text.strip().lower() == "тест запись":
         context.user_data["form"] = {
             "name": "Тестов",
-            "service": "Чистка зубов",  # ← точное название из Airtable
+            "service": "Чистка зубов",  # ← строка, не ID
             "date": "15.05.2025",
             "time": "14:00",
             "phone": "+77001112233"
@@ -115,13 +103,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     form = user_data["form"]
     if all(k in form for k in ("name", "service", "date", "time", "phone")):
-        print("✅ Все поля есть, ищем ID услуги:", form["service"])
-        service_id = find_service_id(form["service"])
-        print("🔍 Найденный ID:", service_id)
-
-        if not service_id:
-            print("❌ Услуга не найдена в Airtable.")
-            return await update.message.reply_text("❌ Услуга не найдена. Проверьте название.")
+        print("✅ Все поля есть, отправляем в Airtable")
 
         payload = {
             "fields": {
@@ -129,7 +111,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Телефон": form["phone"],
                 "Дата записи": form["date"],
                 "Время": form["time"],
-                "Услуга": form["service"],
+                "Услуга": form["service"],  # 👈 Текст, а не ID
                 "Статус": "Новая"
             }
         }
@@ -146,11 +128,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         print("⏳ Ожидаем дополнительные данные от клиента.")
 
-# Запуск бота
+# Запуск
 def main():
     print("🚀 Бот стартует…")
 
-    # Принудительно открываем порт для Render
     sock = socket.socket()
     sock.bind(("0.0.0.0", PORT))
     sock.listen(1)
