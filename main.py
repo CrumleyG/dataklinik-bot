@@ -129,7 +129,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Телефон": form["phone"],
                 "Дата записи": form["date"],
                 "Время": form["time"],
-                "Услуга": [service_id],
+                "Услуга": form["service"],
                 "Статус": "Новая"
             }
         }
