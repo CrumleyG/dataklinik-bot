@@ -16,12 +16,15 @@ RENDER_URL     = os.getenv("RENDER_EXTERNAL_URL", "").strip()
 PORT           = int(os.getenv("PORT", "10000").strip())
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 
-# OpenAI клиент
+# OpenAI
 openai = OpenAI(api_key=OPENAI_API_KEY)
 
-# Авторизация Google Sheets
+# Загрузка ключа из Render Secret File
+with open("/etc/secrets/GOOGLE_SHEETS_KEY", "r") as f:
+    key_data = json.load(f)
+
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-creds = ServiceAccountCredentials.from_json_keyfile_name("service_account.json", scope)
+creds = ServiceAccountCredentials.from_json_keyfile_dict(key_data, scope)
 client = gspread.authorize(creds)
 sheet = client.open_by_url("https://docs.google.com/spreadsheets/d/1_w2CVitInb118oRGHgjsufuwsY4ks4H07aoJJMs_W5I/edit").sheet1
 
@@ -51,7 +54,7 @@ def extract_fields(text):
         "Телефон": phone.group(1) if phone else None,
     }
 
-# Обработка сообщений
+# Хендлер сообщений
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     user_data = context.user_data
@@ -67,7 +70,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             form[k] = v
     user_data["form"] = form
 
-    # GPT ответ
+    # GPT
     messages = [
         {
             "role": "system",
@@ -87,13 +90,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     history.append({"role": "assistant", "content": reply})
     user_data["history"] = history[-20:]
 
-    # Если форма полная — записываем
+    # Если форма полная — пишем в таблицу
     required = ("Имя", "Услуга", "Дата", "Время", "Телефон")
     if all(form.get(k) for k in required):
         now = datetime.now().strftime("%d.%m.%Y %H:%M")
         row = [form["Имя"], form["Телефон"], form["Услуга"], form["Дата"], form["Время"], now]
         sheet.append_row(row)
-        await update.message.reply_text("✅ Запись добавлена в журнал! Спасибо 😊")
+        await update.message.reply_text("✅ Вы успешно записаны! Спасибо 😊")
         user_data["form"] = {}
 
 # Запуск
