@@ -9,7 +9,7 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
 from oauth2client.service_account import ServiceAccountCredentials
 
-# Загрузка переменных
+# Загрузка .env
 load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 RENDER_URL     = os.getenv("RENDER_EXTERNAL_URL", "").strip()
@@ -25,7 +25,7 @@ creds = ServiceAccountCredentials.from_json_keyfile_name("service_account.json",
 client = gspread.authorize(creds)
 sheet = client.open_by_url("https://docs.google.com/spreadsheets/d/1_w2CVitInb118oRGHgjsufuwsY4ks4H07aoJJMs_W5I/edit").sheet1
 
-# Парсинг данных из текста
+# Извлечение данных
 def extract_fields(text):
     name = re.search(r'(зовут|я)\s+([А-ЯЁA-Z][а-яёa-z]+)', text)
     serv = re.search(r'(на|хочу)\s+([а-яёa-z\s]+?)(?=\s*(в|\d{1,2}[.:]))', text, re.IGNORECASE)
@@ -33,7 +33,6 @@ def extract_fields(text):
     time_ = re.search(r'\b(\d{1,2}:\d{2})\b', text)
     phone = re.search(r'(\+?\d{7,15})', text)
 
-    # Преобразование даты
     date_str = None
     if date:
         d = date.group(1)
@@ -52,7 +51,7 @@ def extract_fields(text):
         "Телефон": phone.group(1) if phone else None,
     }
 
-# Основной обработчик
+# Обработка сообщений
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     user_data = context.user_data
@@ -61,7 +60,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     history.append({"role": "user", "content": text})
     user_data["history"] = history[-20:]
 
-    # Извлечение полей
     form = user_data.get("form", {})
     extracted = extract_fields(text)
     for k, v in extracted.items():
@@ -69,35 +67,33 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             form[k] = v
     user_data["form"] = form
 
-    # Формирование промпта
+    # GPT ответ
     messages = [
         {
             "role": "system",
-            "content": "Ты — вежливая и доброжелательная помощница стоматологической клиники. "
+            "content": "Ты — вежливая помощница стоматологической клиники. "
                        "Уточни, если чего-то не хватает: имя, услугу, дату, время и номер телефона."
         }
     ] + history[-10:]
 
-    # Запрос в GPT
     try:
         completion = openai.chat.completions.create(model="gpt-4o", messages=messages)
         reply = completion.choices[0].message.content
     except Exception as e:
-        print("OpenAI Error:", e)
-        await update.message.reply_text("Ошибка OpenAI 😔")
-        return
+        print("❌ OpenAI Error:", e)
+        return await update.message.reply_text("Ошибка при ответе от AI 😔")
 
     await update.message.reply_text(reply)
     history.append({"role": "assistant", "content": reply})
     user_data["history"] = history[-20:]
 
-    # Если форма полная — записываем в Google Таблицу
+    # Если форма полная — записываем
     required = ("Имя", "Услуга", "Дата", "Время", "Телефон")
     if all(form.get(k) for k in required):
         now = datetime.now().strftime("%d.%m.%Y %H:%M")
         row = [form["Имя"], form["Телефон"], form["Услуга"], form["Дата"], form["Время"], now]
         sheet.append_row(row)
-        await update.message.reply_text("✅ Вы успешно записаны! Спасибо 🙏")
+        await update.message.reply_text("✅ Запись добавлена в журнал! Спасибо 😊")
         user_data["form"] = {}
 
 # Запуск
