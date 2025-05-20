@@ -41,6 +41,10 @@ SERVICES = {
     "кариес": "Лечение кариеса — от 10000 ₸",
     "пломба": "Пломба световая — от 12000 ₸",
     "пульпит": "Лечение пульпита — от 18000 ₸",
+    "осмотр": "Профилактический осмотр — Бесплатно / от 2000 ₸",
+    "осмотра": "Профилактический осмотр — Бесплатно / от 2000 ₸",
+    "проф осмотр": "Профилактический осмотр — Бесплатно / от 2000 ₸",
+    "профилактический": "Профилактический осмотр — Бесплатно / от 2000 ₸",
     "детская": "Детская консультация — от 2000 ₸",
     "фторирование": "Фторирование зубов — от 6000 ₸",
     "коронка": "Коронка металлокерамика — от 35000 ₸",
@@ -56,18 +60,41 @@ SERVICES = {
 
 # === Распознавание данных ===
 def extract_fields(text):
-    name = re.search(r'(зовут|я)\s+([А-ЯЁA-Z][а-яёa-z]+)', text)
-    phone = re.search(r'(\+?\d{7,15})', text)
-    time_ = re.search(r'(\d{1,2}:\d{2})', text)
-    date = dateparser.parse(text, settings={"TIMEZONE": "Asia/Almaty", "TO_TIMEZONE": "Asia/Almaty", "RETURN_AS_TIMEZONE_AWARE": False})
-    service = next((key for key in SERVICES if key in text.lower()), None)
-    return {
-        "Имя": name.group(2) if name else None,
-        "Телефон": phone.group(1) if phone else None,
-        "Время": time_.group(1) if time_ else None,
-        "Дата": date.strftime("%d.%m.%Y") if date else None,
-        "Услуга": SERVICES[service] if service else None
-    }
+    result = {}
+    lower = text.lower()
+
+    # Имя
+    m_name = re.search(r'(?:меня зовут|зовут|я)\s+([А-ЯЁA-Z][а-яёa-z]+)', text)
+    if m_name:
+        result["Имя"] = m_name.group(1)
+        print("✅ Имя:", result["Имя"])
+
+    # Телефон
+    m_phone = re.search(r'(\+?\d{7,15})', text)
+    if m_phone:
+        result["Телефон"] = m_phone.group(1)
+        print("✅ Телефон:", result["Телефон"])
+
+    # Время
+    m_time = re.search(r'(\d{1,2}[:\.\-]\d{2})', text)
+    if m_time:
+        result["Время"] = m_time.group(1).replace(".", ":").replace("-", ":")
+        print("✅ Время:", result["Время"])
+
+    # Дата
+    parsed_date = dateparser.parse(text, settings={"TIMEZONE": "Asia/Almaty", "TO_TIMEZONE": "Asia/Almaty", "RETURN_AS_TIMEZONE_AWARE": False})
+    if parsed_date:
+        result["Дата"] = parsed_date.strftime("%d.%m.%Y")
+        print("✅ Дата:", result["Дата"])
+
+    # Услуга
+    for key in SERVICES:
+        if key in lower:
+            result["Услуга"] = SERVICES[key]
+            print("✅ Услуга:", result["Услуга"])
+            break
+
+    return result
 
 # === Ответ на /id ===
 async def show_chat_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -103,7 +130,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             form[k] = v
     user_data["form"] = form
 
-    print("🔎 Распознано:", form)
+    print("🔎 Итог формы:", form)
 
     # Ответ GPT (всегда генерируем)
     messages = [{
@@ -123,7 +150,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Повторная проверка после ответа: если всё собрано, записать
     required = ("Имя", "Услуга", "Дата", "Время", "Телефон")
-    form = user_data.get("form", {})
     if all(form.get(k) for k in required):
         print("✅ Все поля найдены, сохраняем в таблицу")
         record_submission(form, context)
