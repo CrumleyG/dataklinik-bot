@@ -102,15 +102,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             form[k] = v
     user_data["form"] = form
 
-    # Если форма полная — записываем сразу
-    required = ("Имя", "Услуга", "Дата", "Время", "Телефон")
-    if all(form.get(k) for k in required):
-        record_submission(form, context)
-        await update.message.reply_text("✅ Вы успешно записаны! Спасибо 😊")
-        user_data["form"] = {}
-        return
-
-    # Ответ GPT (если нужно уточнить)
+    # Ответ GPT (всегда генерируем)
     messages = [{
         "role": "system",
         "content": "Ты — вежливая помощница стоматологической клиники. Рассказывай про услуги, уточняй недостающие поля (имя, услугу, дату, время, номер)."
@@ -125,6 +117,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(reply)
     history.append({"role": "assistant", "content": reply})
     user_data["history"] = history[-20:]
+
+    # Повторная проверка после ответа: если всё собрано, записать
+    required = ("Имя", "Услуга", "Дата", "Время", "Телефон")
+    form = user_data.get("form", {})
+    if all(form.get(k) for k in required):
+        record_submission(form, context)
+        await update.message.reply_text("✅ Вы успешно записаны! Спасибо 😊")
+        user_data["form"] = {}
 
 # === Запуск ===
 def main():
