@@ -16,6 +16,11 @@ RENDER_URL     = os.getenv("RENDER_EXTERNAL_URL", "").strip()
 PORT           = int(os.getenv("PORT", "10000").strip())
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 
+from telegram.ext import CommandHandler
+
+async def show_chat_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(f"Chat ID: `{update.message.chat_id}`", parse_mode='Markdown')
+
 # OpenAI
 openai = OpenAI(api_key=OPENAI_API_KEY)
 
@@ -103,6 +108,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     print("🚀 Бот запущен")
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    app.add_handler(CommandHandler("id", show_chat_id))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     webhook_url = f"https://{RENDER_URL}/webhook" if not RENDER_URL.startswith("http") else f"{RENDER_URL}/webhook"
