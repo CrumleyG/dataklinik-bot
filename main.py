@@ -1,156 +1,118 @@
 import os
 import re
-import socket
-import time
-import requests
+import json
+import gspread
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
+from openai import OpenAI
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
-from openai import OpenAI
-from datetime import datetime, timedelta
+from oauth2client.service_account import ServiceAccountCredentials
 
-# Загрузка переменных окружения
+# Загрузка переменных
 load_dotenv()
-TELEGRAM_TOKEN      = os.getenv("TELEGRAM_TOKEN", "").strip()
-OPENAI_API_KEY      = os.getenv("OPENAI_API_KEY", "").strip()
-AIRTABLE_TOKEN      = os.getenv("AIRTABLE_TOKEN", "").strip()
-AIRTABLE_BASE_ID    = os.getenv("AIRTABLE_BASE_ID", "").strip()
-AIRTABLE_TABLE_NAME = os.getenv("AIRTABLE_TABLE_NAME", "").strip()
-RENDER_URL          = os.getenv("RENDER_EXTERNAL_URL", "").strip()
-PORT                = int(os.getenv("PORT", "10000").strip())
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
+RENDER_URL     = os.getenv("RENDER_EXTERNAL_URL", "").strip()
+PORT           = int(os.getenv("PORT", "10000").strip())
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 
-if not all([TELEGRAM_TOKEN, OPENAI_API_KEY, AIRTABLE_TOKEN, AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME, RENDER_URL]):
-    raise RuntimeError("❌ ENV-переменные не заданы")
-
-# Клиенты
+# OpenAI клиент
 openai = OpenAI(api_key=OPENAI_API_KEY)
-HEADERS = {"Authorization": f"Bearer {AIRTABLE_TOKEN}", "Content-Type": "application/json"}
 
-# Синонимы услуг
-SERVICE_SYNONYMS = {
-    "чистка": "Чистка зубов",
-    "осмотр": "Профилактический осмотр",
-    "профосмотр": "Профилактический осмотр",
-    "лечение": "Терапия",
-    "чистка зубов": "Чистка зубов"
-}
+# Авторизация Google Sheets
+scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+creds = ServiceAccountCredentials.from_json_keyfile_name("service_account.json", scope)
+client = gspread.authorize(creds)
+sheet = client.open_by_url("https://docs.google.com/spreadsheets/d/1_w2CVitInb118oRGHgjsufuwsY4ks4H07aoJJMs_W5I/edit").sheet1
 
-# Парсинг данных
+# Парсинг данных из текста
 def extract_fields(text):
-    name  = re.search(r'(?:зовут|меня зовут|я)\s*([А-ЯЁ][а-яё]+)', text, re.IGNORECASE)
-    serv  = re.search(r'(?:на|хочу)\s+([а-яё\s]+?)(?=\s*(?:в|\d|\.)|$)', text, re.IGNORECASE)
-    dt    = re.search(r'(?:(\d{1,2}[.\-/]\d{1,2}[.\-/]\d{2,4})|завтра|послезавтра)\s*в\s*(\d{1,2}:\d{2})', text, re.IGNORECASE)
+    name = re.search(r'(зовут|я)\s+([А-ЯЁA-Z][а-яёa-z]+)', text)
+    serv = re.search(r'(на|хочу)\s+([а-яёa-z\s]+?)(?=\s*(в|\d{1,2}[.:]))', text, re.IGNORECASE)
+    date = re.search(r'(завтра|послезавтра|\d{1,2}[.\-/]\d{1,2}[.\-/]\d{2,4})', text)
+    time_ = re.search(r'\b(\d{1,2}:\d{2})\b', text)
     phone = re.search(r'(\+?\d{7,15})', text)
 
-    name = name.group(1).capitalize() if name else None
-    serv_raw = serv.group(1).strip().lower() if serv else None
-    serv = SERVICE_SYNONYMS.get(serv_raw, serv_raw) if serv_raw else None
-
-    date = None
-    if dt:
-        if dt.group(1):
-            date = dt.group(1)
+    # Преобразование даты
+    date_str = None
+    if date:
+        d = date.group(1)
+        if "завтра" in d:
+            date_str = (datetime.now() + timedelta(days=1)).strftime("%d.%m.%Y")
+        elif "послезавтра" in d:
+            date_str = (datetime.now() + timedelta(days=2)).strftime("%d.%m.%Y")
         else:
-            offset = 1 if "завтра" in dt.group(0).lower() else 2
-            date = (datetime.now() + timedelta(days=offset)).strftime("%d.%m.%Y")
-        time_ = dt.group(2)
-    else:
-        time_ = None
+            date_str = d
 
-    return name, serv, date, time_, phone.group(1) if phone else None
+    return {
+        "Имя": name.group(2) if name else None,
+        "Услуга": serv.group(2).strip().capitalize() if serv else None,
+        "Дата": date_str,
+        "Время": time_.group(1) if time_ else None,
+        "Телефон": phone.group(1) if phone else None,
+    }
 
-# Хендлер сообщений
+# Основной обработчик
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     user_data = context.user_data
 
-    # Тестовая вставка
-    if text.strip().lower() == "тест запись":
-        context.user_data["form"] = {
-            "name": "Тестов",
-            "service": "Чистка зубов",  # ← строка, не ID
-            "date": "15.05.2025",
-            "time": "14:00",
-            "phone": "+77001112233"
-        }
-        await update.message.reply_text("🧪 Данные формы вставлены вручную для теста.")
-        text = "запиши"
-
     history = user_data.get("history", [])
     history.append({"role": "user", "content": text})
-    user_data["history"] = history[-30:]
+    user_data["history"] = history[-20:]
 
+    # Извлечение полей
     form = user_data.get("form", {})
-    name, serv, date, time_, phone = extract_fields(text)
-    if name:  form["name"] = name
-    if serv:  form["service"] = serv
-    if date:  form["date"] = date
-    if time_: form["time"] = time_
-    if phone: form["phone"] = phone
+    extracted = extract_fields(text)
+    for k, v in extracted.items():
+        if v:
+            form[k] = v
     user_data["form"] = form
 
-    print("📋 Формуляр:", form)
-
-    try:
-        messages = [{"role": "system", "content": "Вы — помощница стоматологии. Записывайте клиента: имя, услуга, дата, время, телефон. Если чего-то не хватает — спросите."}] + history[-10:]
-        response = openai.chat.completions.create(model="gpt-4o", messages=messages)
-        reply = response.choices[0].message.content
-        await update.message.reply_text(reply)
-        history.append({"role": "assistant", "content": reply})
-    except Exception as e:
-        print("❌ GPT Error:", e)
-        return await update.message.reply_text("Ошибка OpenAI")
-
-    form = user_data["form"]
-    if all(k in form for k in ("name", "service", "date", "time", "phone")):
-        print("✅ Все поля есть, отправляем в Airtable")
-
-        payload = {
-            "fields": {
-                "Клиент": form["name"],
-                "Телефон": form["phone"],
-                "Дата записи": form["date"],
-                "Время": form["time"],
-                "Услуга": form["service"],  # 👈 Текст, а не ID
-                "Статус": "Новая"
-            }
+    # Формирование промпта
+    messages = [
+        {
+            "role": "system",
+            "content": "Ты — вежливая и доброжелательная помощница стоматологической клиники. "
+                       "Уточни, если чего-то не хватает: имя, услугу, дату, время и номер телефона."
         }
+    ] + history[-10:]
 
-        airtable_url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/{AIRTABLE_TABLE_NAME}"
-        res = requests.post(airtable_url, headers=HEADERS, json=payload)
-        print("📤 Airtable:", res.status_code, res.text)
+    # Запрос в GPT
+    try:
+        completion = openai.chat.completions.create(model="gpt-4o", messages=messages)
+        reply = completion.choices[0].message.content
+    except Exception as e:
+        print("OpenAI Error:", e)
+        await update.message.reply_text("Ошибка OpenAI 😔")
+        return
 
-        if res.status_code in (200, 201):
-            await update.message.reply_text(f"✅ Вы записаны на {form['service']} {form['date']} в {form['time']}. До встречи!")
-            user_data.pop("form")
-        else:
-            await update.message.reply_text("⚠️ Ошибка при записи в Airtable.")
-    else:
-        print("⏳ Ожидаем дополнительные данные от клиента.")
+    await update.message.reply_text(reply)
+    history.append({"role": "assistant", "content": reply})
+    user_data["history"] = history[-20:]
+
+    # Если форма полная — записываем в Google Таблицу
+    required = ("Имя", "Услуга", "Дата", "Время", "Телефон")
+    if all(form.get(k) for k in required):
+        now = datetime.now().strftime("%d.%m.%Y %H:%M")
+        row = [form["Имя"], form["Телефон"], form["Услуга"], form["Дата"], form["Время"], now]
+        sheet.append_row(row)
+        await update.message.reply_text("✅ Вы успешно записаны! Спасибо 🙏")
+        user_data["form"] = {}
 
 # Запуск
 def main():
-    print("🚀 Бот стартует…")
-
-    sock = socket.socket()
-    sock.bind(("0.0.0.0", PORT))
-    sock.listen(1)
-    sock.close()
-    time.sleep(1)
-
+    print("🚀 Бот запущен")
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    external = RENDER_URL if RENDER_URL.startswith("http") else "https://" + RENDER_URL
-    webhook_url = f"{external}/webhook"
-    print("🔗 Webhook установлен на:", webhook_url)
-
+    webhook_url = f"https://{RENDER_URL}/webhook" if not RENDER_URL.startswith("http") else f"{RENDER_URL}/webhook"
     app.run_webhook(
         listen="0.0.0.0",
         port=PORT,
         url_path="webhook",
         webhook_url=webhook_url,
-        drop_pending_updates=True
+        drop_pending_updates=True,
     )
 
 if __name__ == "__main__":
