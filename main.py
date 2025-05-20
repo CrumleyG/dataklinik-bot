@@ -73,6 +73,20 @@ def extract_fields(text):
 async def show_chat_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Chat ID: `{update.message.chat_id}`", parse_mode='Markdown')
 
+# === Запись в таблицу и отправка уведомлений ===
+def record_submission(form, context):
+    now = datetime.now().strftime("%d.%m.%Y %H:%M")
+    row = [form["Имя"], form["Телефон"], form["Услуга"], form["Дата"], form["Время"], now]
+    sheet.append_row(row)
+    message = (
+        f"🆕 Новая запись:\n"
+        f"Имя: {row[0]}\n"
+        f"Телефон: {row[1]}\n"
+        f"Услуга: {row[2]}\n"
+        f"Дата: {row[3]} в {row[4]}"
+    )
+    context.bot.send_message(chat_id=GROUP_CHAT_ID, text=message)
+
 # === Ответ на текст ===
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
@@ -88,7 +102,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             form[k] = v
     user_data["form"] = form
 
-    # Ответ GPT
+    # Если форма полная — записываем сразу
+    required = ("Имя", "Услуга", "Дата", "Время", "Телефон")
+    if all(form.get(k) for k in required):
+        record_submission(form, context)
+        await update.message.reply_text("✅ Вы успешно записаны! Спасибо 😊")
+        user_data["form"] = {}
+        return
+
+    # Ответ GPT (если нужно уточнить)
     messages = [{
         "role": "system",
         "content": "Ты — вежливая помощница стоматологической клиники. Рассказывай про услуги, уточняй недостающие поля (имя, услугу, дату, время, номер)."
@@ -103,25 +125,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(reply)
     history.append({"role": "assistant", "content": reply})
     user_data["history"] = history[-20:]
-
-    # Если форма полная — записываем
-    required = ("Имя", "Услуга", "Дата", "Время", "Телефон")
-    if all(form.get(k) for k in required):
-        now = datetime.now().strftime("%d.%m.%Y %H:%M")
-        row = [form["Имя"], form["Телефон"], form["Услуга"], form["Дата"], form["Время"], now]
-        sheet.append_row(row)
-        await update.message.reply_text("✅ Вы успешно записаны! Спасибо 😊")
-        user_data["form"] = {}
-
-        # Уведомление в чат врачей
-        message = (
-            f"🆕 Новая запись:\n"
-            f"Имя: {row[0]}\n"
-            f"Телефон: {row[1]}\n"
-            f"Услуга: {row[2]}\n"
-            f"Дата: {row[3]} в {row[4]}"
-        )
-        await context.bot.send_message(chat_id=GROUP_CHAT_ID, text=message)
 
 # === Запуск ===
 def main():
