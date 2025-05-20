@@ -77,6 +77,7 @@ async def show_chat_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def record_submission(form, context):
     now = datetime.now().strftime("%d.%m.%Y %H:%M")
     row = [form["Имя"], form["Телефон"], form["Услуга"], form["Дата"], form["Время"], now]
+    print("📋 Сохраняем строку в Google Sheets:", row)
     sheet.append_row(row)
     message = (
         f"🆕 Новая запись:\n"
@@ -102,6 +103,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             form[k] = v
     user_data["form"] = form
 
+    print("🔎 Распознано:", form)
+
     # Ответ GPT (всегда генерируем)
     messages = [{
         "role": "system",
@@ -122,9 +125,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     required = ("Имя", "Услуга", "Дата", "Время", "Телефон")
     form = user_data.get("form", {})
     if all(form.get(k) for k in required):
+        print("✅ Все поля найдены, сохраняем в таблицу")
         record_submission(form, context)
         await update.message.reply_text("✅ Вы успешно записаны! Спасибо 😊")
         user_data["form"] = {}
+    else:
+        print("⚠️ Недостаточно данных. Ожидаем...", form)
 
 # === Запуск ===
 def main():
