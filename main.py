@@ -116,6 +116,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     print("🔎 Итог формы:", form)
 
+    # === Если форма полная — записываем ===
+    required = ("Имя", "Телефон", "Услуга", "Дата", "Время")
+    if all(form.get(k) for k in required):
+        row = [
+            form["Имя"],
+            form["Телефон"],
+            form["Услуга"],
+            form["Дата"],
+            form["Время"],
+            datetime.now().strftime("%d.%m.%Y %H:%M")
+        ]
+        sheet.append_row(row)
+
+        # Уведомление врачам
+        notify = f"📥 Новая запись:\n\n👤 {form['Имя']}\n📞 {form['Телефон']}\n🦷 {form['Услуга']}\n📅 {form['Дата']} в {form['Время']}"
+        await context.bot.send_message(chat_id=GROUP_CHAT_ID, text=notify)
+
+        await update.message.reply_text(f"✅ Записала вас, {form['Имя']}! Если появятся вопросы — пишите 😊")
+        user_data["form"] = {}
+    else:
+        print("⚠️ Ожидаем недостающие данные:", form)
+
     # Ответ GPT (всегда генерируем)
     messages = [{
         "role": "system",
@@ -133,7 +155,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_data["history"] = history[-20:]
 
     # Повторная проверка после ответа: если всё собрано, записать
-    required = ("Имя", "Услуга", "Дата", "Время", "Телефон")
     if all(form.get(k) for k in required):
         print("✅ Все поля найдены, сохраняем в таблицу")
         record_submission(form, context)
