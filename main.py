@@ -32,31 +32,9 @@ creds = ServiceAccountCredentials.from_json_keyfile_dict(key_data, scope)
 client = gspread.authorize(creds)
 sheet = client.open_by_url("https://docs.google.com/spreadsheets/d/1_w2CVitInb118oRGHgjsufuwsY4ks4H07aoJJMs_W5I/edit").sheet1
 
-# === Услуги клиники ===
-SERVICES = {
-    "консультация": "Консультация врача — Бесплатно / от 2000 ₸",
-    "рентген": "Рентген зуба — от 3000 ₸",
-    "чистка": "Чистка зубов (профессиональная гигиена) — от 8000 ₸",
-    "отбеливание": "Отбеливание зубов — от 30000 ₸",
-    "кариес": "Лечение кариеса — от 10000 ₸",
-    "пломба": "Пломба световая — от 12000 ₸",
-    "пульпит": "Лечение пульпита — от 18000 ₸",
-    "осмотр": "Профилактический осмотр — Бесплатно / от 2000 ₸",
-    "осмотра": "Профилактический осмотр — Бесплатно / от 2000 ₸",
-    "проф осмотр": "Профилактический осмотр — Бесплатно / от 2000 ₸",
-    "профилактический": "Профилактический осмотр — Бесплатно / от 2000 ₸",
-    "детская": "Детская консультация — от 2000 ₸",
-    "фторирование": "Фторирование зубов — от 6000 ₸",
-    "коронка": "Коронка металлокерамика — от 35000 ₸",
-    "цирконий": "Циркониевая коронка — от 60000 ₸",
-    "протез": "Съемный протез — от 45000 ₸",
-    "удаление": "Удаление зуба — от 7000 ₸",
-    "мудрости": "Удаление зуба мудрости — от 15000 ₸",
-    "резекция": "Резекция корня — от 25000 ₸",
-    "имплант": "Имплант — от 120000 ₸",
-    "брекеты": "Брекеты — от 150000 ₸",
-    "элайнеры": "Элайнеры — от 300000 ₸"
-}
+# === Загрузка услуг из внешнего JSON-файла ===
+with open("services.json", "r", encoding="utf-8") as f:
+    SERVICE_DICT = json.load(f)
 
 # === Распознавание данных ===
 def extract_fields(text):
@@ -76,23 +54,29 @@ def extract_fields(text):
         print("✅ Телефон:", result["Телефон"])
 
     # Время
-    m_time = re.search(r'(\d{1,2}[:\.\-]\d{2})', text)
+    m_time = re.search(r'(\d{1,2}[:\.-]\d{2})', text)
     if m_time:
         result["Время"] = m_time.group(1).replace(".", ":").replace("-", ":")
         print("✅ Время:", result["Время"])
 
-    # Дата
-    parsed_date = dateparser.parse(text, settings={"TIMEZONE": "Asia/Almaty", "TO_TIMEZONE": "Asia/Almaty", "RETURN_AS_TIMEZONE_AWARE": False})
+    # Дата (с базовой точкой отсчёта)
+    parsed_date = dateparser.parse(text, settings={
+        "TIMEZONE": "Asia/Almaty",
+        "TO_TIMEZONE": "Asia/Almaty",
+        "RETURN_AS_TIMEZONE_AWARE": False,
+        "RELATIVE_BASE": datetime(2025, 5, 21)
+    })
     if parsed_date:
         result["Дата"] = parsed_date.strftime("%d.%m.%Y")
         print("✅ Дата:", result["Дата"])
 
     # Услуга
-    for key in SERVICES:
-        if key in lower:
-            result["Услуга"] = SERVICES[key]
-            print("✅ Услуга:", result["Услуга"])
-            break
+    for key, value in SERVICE_DICT.items():
+        for synonym in value["ключи"]:
+            if synonym in lower:
+                result["Услуга"] = value["название"] + " — " + value["цена"]
+                print("✅ Услуга:", result["Услуга"])
+                return result
 
     return result
 
@@ -135,7 +119,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Ответ GPT (всегда генерируем)
     messages = [{
         "role": "system",
-        "content": "Ты — вежливая помощница стоматологической клиники. Рассказывай про услуги, уточняй недостающие поля (имя, услугу, дату, время, номер)."
+        "content": "Ты — вежливая помощница стоматологической клиники. Отвечай только по услугам из предоставленного списка. Не выдумывай услуги. Уточняй недостающие поля: имя, услугу, дату, время, номер."
     }] + history[-10:]
     try:
         completion = openai.chat.completions.create(model="gpt-4o", messages=messages)
