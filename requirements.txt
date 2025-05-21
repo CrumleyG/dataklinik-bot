@@ -1,6 +1,6 @@
-python-telegram-bot[webhooks]==20.3
-openai
+python-telegram-bot[webhooks]>=20.5
+openai>=1.0.0
+python-dotenv
 gspread
 oauth2client
-python-dotenv
-dateparser>=1.1.0
+dateparser
