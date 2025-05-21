@@ -70,7 +70,7 @@ def extract_fields(text):
         result["Дата"] = parsed_date.strftime("%d.%m.%Y")
         print("✅ Дата:", result["Дата"])
 
-    # Услуга
+    # Услуга (по ключевым словам)
     for key, value in SERVICE_DICT.items():
         for synonym in value["ключи"]:
             if synonym in lower:
