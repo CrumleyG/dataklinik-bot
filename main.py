@@ -47,9 +47,10 @@ def extract_fields(text):
     lower = text.lower()
 
     # Имя
-    m = re.search(r'(?:меня зовут|зовут|я)\s+([А-ЯЁA-Z][а-яёa-z]+)', text)
-    if m:
-        result["Имя"] = m.group(1)
+    m = re.search(r'(?:меня зовут|зовут|я)\s+([А-ЯЁA-Z][а-яёa-z]+)|^([А-ЯЁA-Z][а-яёa-z]+)\b', text)
+    if m: 
+       result["Имя"] = m.group(1) or m.group(2)
+
 
     # Телефон
     m = re.search(r'(\+?\d{7,15})', text)
