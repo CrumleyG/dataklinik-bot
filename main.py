@@ -64,9 +64,9 @@ def extract_fields(text):
 
     for key, value in SERVICE_DICT.items():
         for synonym in value["ключи"]:
-            if synonym in lower:
+            if synonym.lower() in lower:
                 result["Услуга"] = value["название"] + " — " + value["цена"]
-                break
+                return result
 
     return result
 
@@ -111,6 +111,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_data["form"] = {}
 
 # Запуск
+
 def main():
     print("🚀 Бот запущен")
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
