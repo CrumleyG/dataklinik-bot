@@ -16,13 +16,10 @@ RENDER_URL     = os.getenv("RENDER_EXTERNAL_URL", "").strip()
 PORT           = int(os.getenv("PORT", "10000").strip())
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 
-# ID группы врачей (замени на свой ID)
 DOCTORS_GROUP_ID = -1002529967465
 
-# OpenAI
 openai = OpenAI(api_key=OPENAI_API_KEY)
 
-# Загрузка ключа Google
 with open("/etc/secrets/GOOGLE_SHEETS_KEY", "r") as f:
     key_data = json.load(f)
 
@@ -31,96 +28,111 @@ creds = ServiceAccountCredentials.from_json_keyfile_dict(key_data, scope)
 client = gspread.authorize(creds)
 sheet = client.open_by_url("https://docs.google.com/spreadsheets/d/1_w2CVitInb118oRGHgjsufuwsY4ks4H07aoJJMs_W5I/edit").sheet1
 
-# Загрузка услуг из services.json
 with open("services.json", "r", encoding="utf-8") as f:
     SERVICES = json.load(f)
 
-# Ключевые слова, указывающие на намерение записаться
 BOOKING_KEYWORDS = [
     "запис", "хочу на", "на прием", "на приём", "appointment", "приём",
     "на консультацию", "запишите", "хочу записаться", "хочу попасть", "могу ли я записаться",
-    "хочу записаться", "хотел бы записаться", "могу записаться", "хочу записаться на", "запиши меня"
+    "хотел бы записаться", "запиши меня", "запишись", "готов записаться"
 ]
+CONFIRM_WORDS = ["всё верно", "все верно", "да", "ок", "подтверждаю", "спасибо", "подтвердить", "верно", "готово"]
 
 def is_booking_intent(text):
-    """Проверяет, хочет ли пользователь записаться на услугу"""
     q = text.lower()
-    for kw in BOOKING_KEYWORDS:
-        if kw in q:
-            return True
-    return False
+    return any(kw in q for kw in BOOKING_KEYWORDS)
+
+def is_confirm_intent(text):
+    q = text.lower()
+    return any(w in q for w in CONFIRM_WORDS)
+
+def match_service(text):
+    q = text.lower()
+    # Поиск по названию услуги
+    for key, data in SERVICES.items():
+        if data['название'].lower() in q:
+            return data['название']
+        # Поиск по ключам
+        for kw in data.get('ключи', []):
+            if kw.lower() in q:
+                return data['название']
+    return None
 
 def get_service_info(query, for_booking=False):
-    """Отвечает на вопросы по услугам или возвращает None если идёт запись"""
     q = query.lower()
-    # Если сейчас идёт явная запись — не выводим инфу о услуге
     if for_booking:
         return None
-
-    # Если спрашивают полный список или цену/прайс
+    # Если спрашивают полный список
     if any(word in q for word in [
         "услуг", "прайс", "стоимость", "цены", "сколько стоит", "какие есть", "перечень", "что делаете", "прайслист"
     ]):
         result = ["📋 *Список услуг нашей клиники:*"]
-        for key, data in SERVICES.items():
+        for data in SERVICES.values():
             line = f"— *{data['название']}* ({data['цена']})"
             result.append(line)
         return "\n".join(result)
-    
-    # Поиск конкретной услуги по ключам или названию (только если НЕ запись)
+    # Если про одну услугу (но не про запись)
     for key, data in SERVICES.items():
-        # Проверка по названию
         if data['название'].lower() in q:
-            text = f"*{data['название']}*\nЦена: {data['цена']}"
-            return text
-        # Проверка по ключам
+            return f"*{data['название']}*\nЦена: {data['цена']}"
         for kw in data.get('ключи', []):
             if kw.lower() in q:
-                text = f"*{data['название']}*\nЦена: {data['цена']}"
-                return text
+                return f"*{data['название']}*\nЦена: {data['цена']}"
     return None
 
-# Функция извлечения полей
 def extract_fields(text):
-    name = re.search(r'(зовут|я)\s+([А-ЯЁA-Z][а-яёa-z]+)', text)
-    serv = re.search(r'(на|хочу)\s+([а-яёa-z\s]+?)(?=\s*(в|\d{1,2}[.:]))', text, re.IGNORECASE)
-    date = re.search(r'(завтра|послезавтра|\d{1,2}[.\-/]\d{1,2}[.\-/]\d{2,4})', text)
-    time_ = re.search(r'\b(\d{1,2}:\d{2})\b', text)
-    phone = re.search(r'(\+?\d{7,15})', text)
-
-    date_str = None
-    if date:
-        d = date.group(1)
+    # Имя
+    name = None
+    match = re.search(r"(зовут|я)\s+([А-ЯЁA-Z][а-яёa-z]+)", text)
+    if match:
+        name = match.group(2)
+    # Услуга
+    service = match_service(text)
+    # Дата
+    date = None
+    date_match = re.search(r'(завтра|послезавтра|\d{1,2}[.\-/]\d{1,2}[.\-/]\d{2,4})', text)
+    if date_match:
+        d = date_match.group(1)
         if "завтра" in d:
-            date_str = (datetime.now() + timedelta(days=1)).strftime("%d.%m.%Y")
+            date = (datetime.now() + timedelta(days=1)).strftime("%d.%m.%Y")
         elif "послезавтра" in d:
-            date_str = (datetime.now() + timedelta(days=2)).strftime("%d.%m.%Y")
+            date = (datetime.now() + timedelta(days=2)).strftime("%d.%m.%Y")
         else:
-            date_str = d
-
+            date = d
+    # Время
+    time_ = None
+    time_match = re.search(r'\b(\d{1,2}[:.]\d{2})\b', text)
+    if time_match:
+        time_ = time_match.group(1).replace('.', ':')
+    # Телефон
+    phone = None
+    phone_match = re.search(r'(\+?\d{7,15})', text)
+    if phone_match:
+        phone = phone_match.group(1)
     return {
-        "Имя": name.group(2) if name else None,
-        "Услуга": serv.group(2).strip().capitalize() if serv else None,
-        "Дата": date_str,
-        "Время": time_.group(1) if time_ else None,
-        "Телефон": phone.group(1) if phone else None,
+        "Имя": name,
+        "Услуга": service,
+        "Дата": date,
+        "Время": time_,
+        "Телефон": phone,
     }
 
-# Хендлер сообщений
+def is_form_complete(form):
+    required = ("Имя", "Услуга", "Дата", "Время", "Телефон")
+    return all(form.get(k) for k in required)
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     user_data = context.user_data
 
+    # 1. Если идёт запись, НЕ показываем справку по услуге
     booking_intent = is_booking_intent(text)
     service_reply = get_service_info(text, for_booking=booking_intent)
     if service_reply:
         await update.message.reply_text(service_reply, parse_mode="Markdown")
         return
 
-    history = user_data.get("history", [])
-    history.append({"role": "user", "content": text})
-    user_data["history"] = history[-20:]
-
+    # 2. Всегда обновляем форму
     form = user_data.get("form", {})
     extracted = extract_fields(text)
     for k, v in extracted.items():
@@ -128,14 +140,30 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             form[k] = v
     user_data["form"] = form
 
-    # После каждого шага проверять заполненность
-    def is_form_complete(form):
-        required = ("Имя", "Услуга", "Дата", "Время", "Телефон")
-        return all(form.get(k) for k in required)
+    # 3. Если форма заполнена — сразу пишем в таблицу и врачам!
+    if is_form_complete(form):
+        now = datetime.now().strftime("%d.%m.%Y %H:%M")
+        row = [form["Имя"], form["Телефон"], form["Услуга"], form["Дата"], form["Время"], now]
+        sheet.append_row(row)
+        doctors_msg = (
+            f"🦷 *Новая запись пациента!*\n"
+            f"Имя: {form['Имя']}\n"
+            f"Телефон: {form['Телефон']}\n"
+            f"Услуга: {form['Услуга']}\n"
+            f"Дата: {form['Дата']}\n"
+            f"Время: {form['Время']}"
+        )
+        await context.bot.send_message(
+            chat_id=DOCTORS_GROUP_ID,
+            text=doctors_msg,
+            parse_mode="Markdown"
+        )
+        await update.message.reply_text("✅ Вы успешно записаны! Спасибо 😊")
+        user_data["form"] = {}
+        return
 
-    # Если пользователь пишет что-то вроде "всё верно", "да", "ок", "подтверждаю", пробуем записать повторно!
-    CONFIRM_WORDS = ["всё верно", "все верно", "да", "ок", "подтверждаю", "спасибо", "подтвердить"]
-    if any(w in text.lower() for w in CONFIRM_WORDS) and is_form_complete(form):
+    # 4. Если форма НЕ заполнена, но человек пишет "всё верно" или "подтверждаю" — тоже пробуем записать (на случай, если поля не уловились с первого раза)
+    if is_confirm_intent(text) and is_form_complete(form):
         now = datetime.now().strftime("%d.%m.%Y %H:%M")
         row = [form["Имя"], form["Телефон"], form["Услуга"], form["Дата"], form["Время"], now]
         sheet.append_row(row)
@@ -156,14 +184,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_data["form"] = {}
         return
 
-    # GPT для диалога
+    # 5. Ведём дальше диалог (OpenAI)
+    history = user_data.get("history", [])
+    history.append({"role": "user", "content": text})
+    user_data["history"] = history[-20:]
+
     messages = [
         {
             "role": "system",
             "content": "Ты — вежливая помощница стоматологической клиники. "
                        "Если пользователь говорит 'записать', 'запишись', 'я хочу на услугу', 'записаться', 'на приём', 'на консультацию', то не отвечай справкой по услуге, а веди диалог записи. "
-                       "Уточни, если чего-то не хватает: имя, услугу, дату, время и номер телефона. "
-                       "Если пользователь просит изменить услугу, время, дату — уточни только этот параметр, не сбрасывая остальные."
+                       "Тебе нужно последовательно узнать имя, услугу (название из списка клиники), дату, время, телефон."
+                       "Если услуга называется по-разному — спрашивай только из списка клиники (services.json)."
+                       "Не дублируй вопросы, если пользователь уже всё написал."
         }
     ] + history[-10:]
 
@@ -178,28 +211,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     history.append({"role": "assistant", "content": reply})
     user_data["history"] = history[-20:]
 
-    # Старая проверка — не убираем!
-    if is_form_complete(form):
-        now = datetime.now().strftime("%d.%m.%Y %H:%M")
-        row = [form["Имя"], form["Телефон"], form["Услуга"], form["Дата"], form["Время"], now]
-        sheet.append_row(row)
-        doctors_msg = (
-            f"🦷 *Новая запись пациента!*\n"
-            f"Имя: {form['Имя']}\n"
-            f"Телефон: {form['Телефон']}\n"
-            f"Услуга: {form['Услуга']}\n"
-            f"Дата: {form['Дата']}\n"
-            f"Время: {form['Время']}"
-        )
-        await context.bot.send_message(
-            chat_id=DOCTORS_GROUP_ID,
-            text=doctors_msg,
-            parse_mode="Markdown"
-        )
-        await update.message.reply_text("✅ Вы успешно записаны! Спасибо 😊")
-        user_data["form"] = {}
-
-# Запуск
 def main():
     print("🚀 Бот запущен")
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
