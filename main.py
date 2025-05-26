@@ -85,13 +85,16 @@ def extract_fields(text):
     if not name:
         parts = text.replace(",", " ").split()
         first_word = parts[0].capitalize() if parts else ""
-        # Не берём служебные слова и услуги как имя!
+        # Проверяем, что это не телефон и не цифра!
         service_words = ['на', 'осмотр', 'консультацию', 'консультация', 'мне', 'я', 'записаться', 'хочу', 'номер']
-        if (first_word and
+        if (
+            first_word and
             first_word.lower() not in service_words and
-            not first_word.lower().startswith("на")):
+            not first_word.lower().startswith("на") and
+            not re.fullmatch(r"\+?\d{7,15}", first_word)  # <--- Вот это условие!
+        ):
             name = first_word
-    # Услуга
+    # ... дальше как было ...
     service = match_service(text)
     # Дата
     date = None
