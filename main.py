@@ -31,6 +31,37 @@ creds = ServiceAccountCredentials.from_json_keyfile_dict(key_data, scope)
 client = gspread.authorize(creds)
 sheet = client.open_by_url("https://docs.google.com/spreadsheets/d/1_w2CVitInb118oRGHgjsufuwsY4ks4H07aoJJMs_W5I/edit").sheet1
 
+# Загрузка услуг из services.json
+with open("services.json", "r", encoding="utf-8") as f:
+    SERVICES = json.load(f)
+
+def get_service_info(query):
+    """Отвечает на вопросы по услугам на основе services.json"""
+    q = query.lower()
+
+    # Если спрашивают полный список или цену/прайс
+    if any(word in q for word in [
+        "услуг", "прайс", "стоимость", "цены", "сколько стоит", "какие есть", "перечень", "что делаете", "прайслист"
+    ]):
+        result = ["📋 *Список услуг нашей клиники:*"]
+        for key, data in SERVICES.items():
+            line = f"— *{data['название']}* ({data['цена']})"
+            result.append(line)
+        return "\n".join(result)
+    
+    # Поиск конкретной услуги по ключам или названию
+    for key, data in SERVICES.items():
+        # Проверка по названию
+        if data['название'].lower() in q:
+            text = f"*{data['название']}*\nЦена: {data['цена']}"
+            return text
+        # Проверка по ключам
+        for kw in data.get('ключи', []):
+            if kw.lower() in q:
+                text = f"*{data['название']}*\nЦена: {data['цена']}"
+                return text
+    return None
+
 # Функция извлечения полей
 def extract_fields(text):
     name = re.search(r'(зовут|я)\s+([А-ЯЁA-Z][а-яёa-z]+)', text)
@@ -62,6 +93,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     user_data = context.user_data
 
+    # ---- Консультация по услугам ----
+    service_reply = get_service_info(text)
+    if service_reply:
+        await update.message.reply_text(service_reply, parse_mode="Markdown")
+        return
+
+    # ---- Ведение истории для OpenAI ----
     history = user_data.get("history", [])
     history.append({"role": "user", "content": text})
     user_data["history"] = history[-20:]
