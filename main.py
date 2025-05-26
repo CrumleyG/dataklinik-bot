@@ -77,14 +77,22 @@ def build_services_list():
 def extract_fields(text):
     # Имя
     name = None
-    m = re.search(r"(зовут|я)\s+([А-ЯЁA-Z][а-яёa-z]+)", text)
+    m = re.search(r"(?:зовут|я)\s+([А-ЯЁA-Z][а-яёa-z]+)", text)
     if m:
-        name = m.group(2)
-    # Имя, если просто написали (например, "Илья, 877...") — выдёргиваем первое слово (если оно не похоже на услугу, дату и т.п.)
+        candidate = m.group(1)
+        if candidate.lower() not in ['на', 'мне', 'я', 'меня', 'осмотр', 'консультацию', 'консультация']:
+            name = candidate
+    # Имя, если просто написали (“Ибрагим”, “Александра 877…”)
     if not name:
         parts = text.replace(",", " ").split()
-        if len(parts) > 1 and parts[0].isalpha() and not parts[0].isdigit():
-            name = parts[0].capitalize()
+        first_word = parts[0].capitalize() if parts else ""
+        # Не берём служебные слова и услуги как имя!
+        service_words = ['на', 'осмотр', 'консультацию', 'консультация', 'мне', 'я', 'записаться', 'хочу', 'номер']
+        if (first_word and
+            first_word.lower() not in service_words and
+            not first_word.lower().startswith("на")):
+            name = first_word
+    # (далее как обычно...)
     # Услуга
     service = match_service(text)
     # Дата
