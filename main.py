@@ -35,9 +35,27 @@ sheet = client.open_by_url("https://docs.google.com/spreadsheets/d/1_w2CVitInb11
 with open("services.json", "r", encoding="utf-8") as f:
     SERVICES = json.load(f)
 
-def get_service_info(query):
-    """Отвечает на вопросы по услугам на основе services.json"""
+# Ключевые слова, указывающие на намерение записаться
+BOOKING_KEYWORDS = [
+    "запис", "хочу на", "на прием", "на приём", "appointment", "приём",
+    "на консультацию", "запишите", "хочу записаться", "хочу попасть", "могу ли я записаться",
+    "хочу записаться", "хотел бы записаться", "могу записаться", "хочу записаться на", "запиши меня"
+]
+
+def is_booking_intent(text):
+    """Проверяет, хочет ли пользователь записаться на услугу"""
+    q = text.lower()
+    for kw in BOOKING_KEYWORDS:
+        if kw in q:
+            return True
+    return False
+
+def get_service_info(query, for_booking=False):
+    """Отвечает на вопросы по услугам или возвращает None если идёт запись"""
     q = query.lower()
+    # Если сейчас идёт явная запись — не выводим инфу о услуге
+    if for_booking:
+        return None
 
     # Если спрашивают полный список или цену/прайс
     if any(word in q for word in [
@@ -49,7 +67,7 @@ def get_service_info(query):
             result.append(line)
         return "\n".join(result)
     
-    # Поиск конкретной услуги по ключам или названию
+    # Поиск конкретной услуги по ключам или названию (только если НЕ запись)
     for key, data in SERVICES.items():
         # Проверка по названию
         if data['название'].lower() in q:
@@ -93,8 +111,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     user_data = context.user_data
 
+    # ---- Анализ намерения пользователя ----
+    booking_intent = is_booking_intent(text)
+
     # ---- Консультация по услугам ----
-    service_reply = get_service_info(text)
+    service_reply = get_service_info(text, for_booking=booking_intent)
     if service_reply:
         await update.message.reply_text(service_reply, parse_mode="Markdown")
         return
@@ -116,6 +137,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         {
             "role": "system",
             "content": "Ты — вежливая помощница стоматологической клиники. "
+                       "Если пользователь говорит 'записать', 'запишись', 'я хочу на услугу', 'записаться', 'на приём', 'на консультацию', то не отвечай справкой по услуге, а веди диалог записи. "
                        "Уточни, если чего-то не хватает: имя, услугу, дату, время и номер телефона."
         }
     ] + history[-10:]
