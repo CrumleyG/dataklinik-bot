@@ -38,9 +38,15 @@ BOOKING_KEYWORDS = [
     "на консультацию", "запишите", "хочу записаться", "хочу попасть", "могу ли я записаться",
     "хотел бы записаться", "запиши меня", "запишись", "готов записаться"
 ]
-CONFIRM_WORDS = ["всё верно", "все верно", "да", "ок", "подтверждаю", "спасибо", "подтвердить", "верно", "готово"]
+CONFIRM_WORDS = [
+    "всё верно", "все верно", "да", "ок", "подтверждаю", "спасибо",
+    "подтвердить", "верно", "готово", "вы записаны", "запись подтверждена", "ваша запись подтверждена"
+]
+BOT_CONFIRM_PHRASES = [
+    "ваша запись подтверждена", "вы записаны", "запись на консультацию подтверждена",
+    "ваша запись успешно подтверждена", "ждём вас", "ждем вас"
+]
 
-# --- Вспомогательные функции ---
 def is_booking_intent(text):
     q = text.lower()
     return any(kw in q for kw in BOOKING_KEYWORDS)
@@ -48,6 +54,10 @@ def is_booking_intent(text):
 def is_confirm_intent(text):
     q = text.lower()
     return any(w in q for w in CONFIRM_WORDS)
+
+def is_bot_confirm(reply):
+    q = reply.lower()
+    return any(w in q for w in BOT_CONFIRM_PHRASES)
 
 def match_service(text):
     q = text.lower()
@@ -120,7 +130,6 @@ def is_form_complete(form):
     required = ("Имя", "Услуга", "Дата", "Время", "Телефон")
     return all(form.get(k) for k in required)
 
-# --- Основная логика обработки сообщений ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     user_data = context.user_data
@@ -168,8 +177,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     history.append({"role": "assistant", "content": reply})
     user_data["history"] = history[-20:]
 
-    # 5. После любого сообщения — КРИТИЧНО: снова проверить, заполнена ли форма!
-    if is_form_complete(form):
+    # 5. После любого сообщения — снова проверить, заполнена ли форма!
+    # Если OpenAI дал шаблон с подтверждением, или человек написал "да", "подтверждаю" и т.п.
+    if is_form_complete(form) and (is_confirm_intent(text) or is_bot_confirm(reply)):
         now = datetime.now().strftime("%d.%m.%Y %H:%M")
         row = [form["Имя"], form["Телефон"], form["Услуга"], form["Дата"], form["Время"], now]
         sheet.append_row(row)
@@ -189,7 +199,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ Вы успешно записаны! Спасибо 😊")
         user_data["form"] = {}
 
-# --- Запуск приложения ---
 def main():
     print("🚀 Бот запущен")
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
