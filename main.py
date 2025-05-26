@@ -33,7 +33,6 @@ with open("services.json", "r", encoding="utf-8") as f:
     SERVICES_DICT = json.load(f)
     SERVICES = list(SERVICES_DICT.values())
 
-# --- Ключевые слова и шаблоны ---
 BOOKING_KEYWORDS = [
     "запис", "хочу на", "на прием", "на приём", "appointment", "приём",
     "на консультацию", "запишите", "хочу записаться", "хочу попасть", "могу ли я записаться",
@@ -92,7 +91,6 @@ def extract_fields(text):
             first_word.lower() not in service_words and
             not first_word.lower().startswith("на")):
             name = first_word
-    # (далее как обычно...)
     # Услуга
     service = match_service(text)
     # Дата
@@ -128,11 +126,32 @@ def is_form_complete(form):
     required = ("Имя", "Услуга", "Дата", "Время", "Телефон")
     return all(form.get(k) for k in required)
 
+# --- Вынесенная функция записи и уведомления ---
+async def register_and_notify(form, context, update):
+    now = datetime.now().strftime("%d.%m.%Y %H:%M")
+    row = [form["Имя"], form["Телефон"], form["Услуга"], form["Дата"], form["Время"], now]
+    sheet.append_row(row)
+    doctors_msg = (
+        f"🦷 *Новая запись пациента!*\n"
+        f"Имя: {form['Имя']}\n"
+        f"Телефон: {form['Телефон']}\n"
+        f"Услуга: {form['Услуга']}\n"
+        f"Дата: {form['Дата']}\n"
+        f"Время: {form['Время']}"
+    )
+    await context.bot.send_message(
+        chat_id=DOCTORS_GROUP_ID,
+        text=doctors_msg,
+        parse_mode="Markdown"
+    )
+    await update.message.reply_text("✅ Вы успешно записаны! Спасибо 😊")
+
+# --- Главный хендлер сообщений ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     user_data = context.user_data
 
-    # 1. Справка по услугам — по требованию, но не мешает процессу записи
+    # 1. Если запрос на услуги — сразу показываем список
     if is_consult_intent(text):
         await update.message.reply_text(build_services_list(), parse_mode="Markdown")
         return
@@ -145,29 +164,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             form[k] = v
     user_data["form"] = form
 
-    # 3. Моментальная запись если все поля есть (до AI!)
+    # 3. Если форма полная — сразу записываем и чистим
     if is_form_complete(form):
-        now = datetime.now().strftime("%d.%m.%Y %H:%M")
-        row = [form["Имя"], form["Телефон"], form["Услуга"], form["Дата"], form["Время"], now]
-        sheet.append_row(row)
-        doctors_msg = (
-            f"🦷 *Новая запись пациента!*\n"
-            f"Имя: {form['Имя']}\n"
-            f"Телефон: {form['Телефон']}\n"
-            f"Услуга: {form['Услуга']}\n"
-            f"Дата: {form['Дата']}\n"
-            f"Время: {form['Время']}"
-        )
-        await context.bot.send_message(
-            chat_id=DOCTORS_GROUP_ID,
-            text=doctors_msg,
-            parse_mode="Markdown"
-        )
-        await update.message.reply_text("✅ Вы успешно записаны! Спасибо 😊")
+        await register_and_notify(form, context, update)
         user_data["form"] = {}
         return
 
-    # 4. Если не хватает полей — AI докапывает аккуратно (только нужный вопрос)
+    # 4. AI докапывает недостающее
     history = user_data.get("history", [])
     history.append({"role": "user", "content": text})
     user_data["history"] = history[-20:]
@@ -197,24 +200,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 5. После AI ещё раз проверяем — вдруг собрали все данные после последнего сообщения
     form = user_data.get("form", {})
     if is_form_complete(form):
-        now = datetime.now().strftime("%d.%m.%Y %H:%M")
-        row = [form["Имя"], form["Телефон"], form["Услуга"], form["Дата"], form["Время"], now]
-        sheet.append_row(row)
-        doctors_msg = (
-            f"🦷 *Новая запись пациента!*\n"
-            f"Имя: {form['Имя']}\n"
-            f"Телефон: {form['Телефон']}\n"
-            f"Услуга: {form['Услуга']}\n"
-            f"Дата: {form['Дата']}\n"
-            f"Время: {form['Время']}"
-        )
-        await context.bot.send_message(
-            chat_id=DOCTORS_GROUP_ID,
-            text=doctors_msg,
-            parse_mode="Markdown"
-        )
-        await update.message.reply_text("✅ Вы успешно записаны! Спасибо 😊")
+        await register_and_notify(form, context, update)
         user_data["form"] = {}
+        return
 
 def main():
     print("🚀 Бот запущен")
