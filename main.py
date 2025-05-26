@@ -30,86 +30,64 @@ sheet = client.open_by_url("https://docs.google.com/spreadsheets/d/1_w2CVitInb11
 
 # --- Услуги клиники ---
 with open("services.json", "r", encoding="utf-8") as f:
-    SERVICES = list(json.load(f).values())  # теперь список
+    SERVICES_DICT = json.load(f)
+    SERVICES = list(SERVICES_DICT.values())
 
 # --- Ключевые слова и шаблоны ---
-BOOKING_KEYWORDS = ["запис", "хочу на", "на прием", "на приём", "appointment", "приём",
+BOOKING_KEYWORDS = [
+    "запис", "хочу на", "на прием", "на приём", "appointment", "приём",
     "на консультацию", "запишите", "хочу записаться", "хочу попасть", "могу ли я записаться",
     "хотел бы записаться", "запиши меня", "запишись", "готов записаться"
+]
+CONSULT_WORDS = [
+    "услуг", "прайс", "стоимость", "цены", "сколько стоит", "какие есть", "перечень", "что делаете", "прайслист"
 ]
 CONFIRM_WORDS = [
     "всё верно", "все верно", "да", "ок", "подтверждаю", "спасибо",
     "подтвердить", "верно", "готово", "вы записаны", "запись подтверждена", "ваша запись подтверждена"
-]
-BOT_CONFIRM_PHRASES = [
-    "ваша запись подтверждена", "вы записаны", "запись на консультацию подтверждена",
-    "ваша запись успешно подтверждена", "ждём вас", "ждем вас"
 ]
 
 def is_booking_intent(text):
     q = text.lower()
     return any(kw in q for kw in BOOKING_KEYWORDS)
 
+def is_consult_intent(text):
+    q = text.lower()
+    return any(w in q for w in CONSULT_WORDS)
+
 def is_confirm_intent(text):
     q = text.lower()
     return any(w in q for w in CONFIRM_WORDS)
 
-def is_bot_confirm(reply):
-    q = reply.lower()
-    return any(w in q for w in BOT_CONFIRM_PHRASES)
-
-def get_service_index_from_user_input(text):
-    # если пользователь вводит "1", "2", "3" и т.д.
-    match = re.match(r"^\s*(\d+)\s*$", text.strip())
-    if match:
-        idx = int(match.group(1)) - 1
+def match_service(text):
+    q = text.lower()
+    # Числовой выбор услуги (например, "1" или "2")
+    m = re.match(r"^\s*(\d+)\s*$", text)
+    if m:
+        idx = int(m.group(1)) - 1
         if 0 <= idx < len(SERVICES):
             return SERVICES[idx]['название']
-    return None
-
-def match_service(text):
-    # Поиск по номеру (если человек отвечает "1" или "2" и т.п.)
-    name_by_index = get_service_index_from_user_input(text)
-    if name_by_index:
-        return name_by_index
-    q = text.lower()
-    # Поиск по названию и ключам
-    for data in SERVICES:
-        if data['название'].lower() in q:
-            return data['название']
-        for kw in data.get('ключи', []):
+    # Поиск по названию или ключам
+    for s in SERVICES:
+        if s['название'].lower() in q:
+            return s['название']
+        for kw in s.get('ключи', []):
             if kw.lower() in q:
-                return data['название']
+                return s['название']
     return None
 
 def build_services_list():
     result = ["📋 *Список услуг нашей клиники:*"]
-    for i, data in enumerate(SERVICES, 1):
-        result.append(f"{i}. *{data['название']}* ({data['цена']})")
+    for i, s in enumerate(SERVICES, 1):
+        result.append(f"{i}. *{s['название']}* ({s['цена']})")
     return "\n".join(result)
-
-def get_service_info(query, for_booking=False):
-    q = query.lower()
-    if for_booking:
-        return None
-    if any(word in q for word in [
-        "услуг", "прайс", "стоимость", "цены", "сколько стоит", "какие есть", "перечень", "что делаете", "прайслист"
-    ]):
-        return build_services_list()
-    for data in SERVICES:
-        if data['название'].lower() in q:
-            return f"*{data['название']}*\nЦена: {data['цена']}"
-        for kw in data.get('ключи', []):
-            if kw.lower() in q:
-                return f"*{data['название']}*\nЦена: {data['цена']}"
-    return None
 
 def extract_fields(text):
     # Имя
     name = None
-    match = re.search(r"(зовут|я)\s+([А-ЯЁA-Z][а-яёa-z]+)", text)
-    if match:
-        name = match.group(2)
+    m = re.search(r"(зовут|я)\s+([А-ЯЁA-Z][а-яёa-z]+)", text)
+    if m:
+        name = m.group(2)
     # Услуга
     service = match_service(text)
     # Дата
@@ -149,14 +127,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     user_data = context.user_data
 
-    # 1. Справка по услугам (только если НЕ запись)
-    booking_intent = is_booking_intent(text)
-    service_reply = get_service_info(text, for_booking=booking_intent)
-    if service_reply:
-        await update.message.reply_text(service_reply, parse_mode="Markdown")
+    # 1. Если спрашивают справку об услугах — только справка
+    if is_consult_intent(text):
+        await update.message.reply_text(build_services_list(), parse_mode="Markdown")
         return
 
-    # 2. Собираем данные для формы
+    # 2. Собираем данные из сообщения
     form = user_data.get("form", {})
     extracted = extract_fields(text)
     for k, v in extracted.items():
@@ -164,40 +140,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             form[k] = v
     user_data["form"] = form
 
-    # 3. Если пользователь выбрал некорректную услугу — просим выбрать из списка (не продолжаем!)
-    if not form.get("Услуга") and booking_intent:
-        await update.message.reply_text("Пожалуйста, выберите одну из услуг по номеру или названию:\n" + build_services_list(), parse_mode="Markdown")
+    # 3. Если человек только выбирает услугу, но написал несуществующую — даём правильный список!
+    if not form.get("Услуга") and is_booking_intent(text):
+        await update.message.reply_text("Пожалуйста, выберите услугу по номеру или названию из списка:\n" + build_services_list(), parse_mode="Markdown")
         return
 
-    # 4. История общения
-    history = user_data.get("history", [])
-    history.append({"role": "user", "content": text})
-    user_data["history"] = history[-20:]
-
-    # 5. Отправляем ответ OpenAI
-    messages = [
-        {
-            "role": "system",
-            "content": "Ты — вежливая помощница стоматологической клиники. "
-                       "Если пользователь говорит 'записать', 'запишись', 'я хочу на услугу', 'записаться', 'на приём', 'на консультацию', то не отвечай справкой по услуге, а веди диалог записи. "
-                       "Тебе нужно последовательно узнать имя, услугу (название только из списка клиники, если не выбрано — всегда предлагай список с номерами!), дату, время, телефон."
-                       "Если пользователь выбирает номер услуги — всегда преобразуй в название и продолжай диалог только по этим услугам."
-        }
-    ] + history[-10:]
-
-    try:
-        completion = openai.chat.completions.create(model="gpt-4o", messages=messages)
-        reply = completion.choices[0].message.content
-    except Exception as e:
-        print("❌ OpenAI Error:", e)
-        return await update.message.reply_text("Ошибка при ответе от AI 😔")
-
-    await update.message.reply_text(reply)
-    history.append({"role": "assistant", "content": reply})
-    user_data["history"] = history[-20:]
-
-    # 6. После любого сообщения — снова проверить, заполнена ли форма!
-    if is_form_complete(form) and (is_confirm_intent(text) or is_bot_confirm(reply)):
+    # 4. Если все поля собраны — автоматом записываем и очищаем форму
+    if is_form_complete(form):
         now = datetime.now().strftime("%d.%m.%Y %H:%M")
         row = [form["Имя"], form["Телефон"], form["Услуга"], form["Дата"], form["Время"], now]
         sheet.append_row(row)
@@ -216,12 +165,39 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await update.message.reply_text("✅ Вы успешно записаны! Спасибо 😊")
         user_data["form"] = {}
+        return
+
+    # 5. Если не хватает полей — AI помогает дособрать без зацикливаний
+    history = user_data.get("history", [])
+    history.append({"role": "user", "content": text})
+    user_data["history"] = history[-20:]
+
+    ai_prompt = (
+        "Ты — вежливая помощница стоматологической клиники, всегда в контексте записи. "
+        "Твоя задача — аккуратно узнать имя, услугу (только из списка услуг клиники!), дату, время, телефон. "
+        "Если человек написал не все данные, задай только нужный вопрос, не повторяя уже собранные данные. "
+        "Если просят выбрать услугу — предложи только услуги из этого списка:\n"
+        + build_services_list() +
+        "\nНе дублируй вопросы. Если человек выбрал номер, преобразуй его в название услуги из списка."
+    )
+
+    messages = [{"role": "system", "content": ai_prompt}] + history[-10:]
+
+    try:
+        completion = openai.chat.completions.create(model="gpt-4o", messages=messages)
+        reply = completion.choices[0].message.content
+    except Exception as e:
+        print("❌ OpenAI Error:", e)
+        return await update.message.reply_text("Ошибка при ответе от AI 😔")
+
+    await update.message.reply_text(reply)
+    history.append({"role": "assistant", "content": reply})
+    user_data["history"] = history[-20:]
 
 def main():
     print("🚀 Бот запущен")
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
     webhook_url = f"https://{RENDER_URL}/webhook" if not RENDER_URL.startswith("http") else f"{RENDER_URL}/webhook"
     app.run_webhook(
         listen="0.0.0.0",
