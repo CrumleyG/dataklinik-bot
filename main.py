@@ -111,16 +111,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     user_data = context.user_data
 
-    # ---- Анализ намерения пользователя ----
     booking_intent = is_booking_intent(text)
-
-    # ---- Консультация по услугам ----
     service_reply = get_service_info(text, for_booking=booking_intent)
     if service_reply:
         await update.message.reply_text(service_reply, parse_mode="Markdown")
         return
 
-    # ---- Ведение истории для OpenAI ----
     history = user_data.get("history", [])
     history.append({"role": "user", "content": text})
     user_data["history"] = history[-20:]
@@ -132,13 +128,42 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             form[k] = v
     user_data["form"] = form
 
-    # GPT: для естественного диалога
+    # После каждого шага проверять заполненность
+    def is_form_complete(form):
+        required = ("Имя", "Услуга", "Дата", "Время", "Телефон")
+        return all(form.get(k) for k in required)
+
+    # Если пользователь пишет что-то вроде "всё верно", "да", "ок", "подтверждаю", пробуем записать повторно!
+    CONFIRM_WORDS = ["всё верно", "все верно", "да", "ок", "подтверждаю", "спасибо", "подтвердить"]
+    if any(w in text.lower() for w in CONFIRM_WORDS) and is_form_complete(form):
+        now = datetime.now().strftime("%d.%m.%Y %H:%M")
+        row = [form["Имя"], form["Телефон"], form["Услуга"], form["Дата"], form["Время"], now]
+        sheet.append_row(row)
+        doctors_msg = (
+            f"🦷 *Новая запись пациента!*\n"
+            f"Имя: {form['Имя']}\n"
+            f"Телефон: {form['Телефон']}\n"
+            f"Услуга: {form['Услуга']}\n"
+            f"Дата: {form['Дата']}\n"
+            f"Время: {form['Время']}"
+        )
+        await context.bot.send_message(
+            chat_id=DOCTORS_GROUP_ID,
+            text=doctors_msg,
+            parse_mode="Markdown"
+        )
+        await update.message.reply_text("✅ Ваша запись подтверждена и сохранена! Спасибо 😊")
+        user_data["form"] = {}
+        return
+
+    # GPT для диалога
     messages = [
         {
             "role": "system",
             "content": "Ты — вежливая помощница стоматологической клиники. "
                        "Если пользователь говорит 'записать', 'запишись', 'я хочу на услугу', 'записаться', 'на приём', 'на консультацию', то не отвечай справкой по услуге, а веди диалог записи. "
-                       "Уточни, если чего-то не хватает: имя, услугу, дату, время и номер телефона."
+                       "Уточни, если чего-то не хватает: имя, услугу, дату, время и номер телефона. "
+                       "Если пользователь просит изменить услугу, время, дату — уточни только этот параметр, не сбрасывая остальные."
         }
     ] + history[-10:]
 
@@ -153,14 +178,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     history.append({"role": "assistant", "content": reply})
     user_data["history"] = history[-20:]
 
-    # Если форма полная — пишем в таблицу и шлём врачам
-    required = ("Имя", "Услуга", "Дата", "Время", "Телефон")
-    if all(form.get(k) for k in required):
+    # Старая проверка — не убираем!
+    if is_form_complete(form):
         now = datetime.now().strftime("%d.%m.%Y %H:%M")
         row = [form["Имя"], form["Телефон"], form["Услуга"], form["Дата"], form["Время"], now]
         sheet.append_row(row)
-
-        # Шаблон для группы врачей
         doctors_msg = (
             f"🦷 *Новая запись пациента!*\n"
             f"Имя: {form['Имя']}\n"
@@ -169,13 +191,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Дата: {form['Дата']}\n"
             f"Время: {form['Время']}"
         )
-        # Отправка в группу врачей
         await context.bot.send_message(
             chat_id=DOCTORS_GROUP_ID,
             text=doctors_msg,
             parse_mode="Markdown"
         )
-
         await update.message.reply_text("✅ Вы успешно записаны! Спасибо 😊")
         user_data["form"] = {}
 
