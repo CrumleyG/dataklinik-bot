@@ -16,10 +16,13 @@ RENDER_URL     = os.getenv("RENDER_EXTERNAL_URL", "").strip()
 PORT           = int(os.getenv("PORT", "10000").strip())
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 
+# ID группы врачей (замени на свой ID)
+DOCTORS_GROUP_ID = -1002529967465
+
 # OpenAI
 openai = OpenAI(api_key=OPENAI_API_KEY)
 
-# Загрузка ключа из Render Secret File
+# Загрузка ключа Google
 with open("/etc/secrets/GOOGLE_SHEETS_KEY", "r") as f:
     key_data = json.load(f)
 
@@ -28,47 +31,31 @@ creds = ServiceAccountCredentials.from_json_keyfile_dict(key_data, scope)
 client = gspread.authorize(creds)
 sheet = client.open_by_url("https://docs.google.com/spreadsheets/d/1_w2CVitInb118oRGHgjsufuwsY4ks4H07aoJJMs_W5I/edit").sheet1
 
-# Загрузка услуг
-with open("services.json", "r", encoding="utf-8") as f:
-    SERVICE_DICT = json.load(f)
-
-# Извлечение данных
+# Функция извлечения полей
 def extract_fields(text):
-    result = {}
-    lower = text.lower()
-
     name = re.search(r'(зовут|я)\s+([А-ЯЁA-Z][а-яёa-z]+)', text)
-    if name:
-        result["Имя"] = name.group(2)
-
-    phone = re.search(r'(\+?\d{7,15})', text)
-    if phone:
-        result["Телефон"] = phone.group(1)
-
+    serv = re.search(r'(на|хочу)\s+([а-яёa-z\s]+?)(?=\s*(в|\d{1,2}[.:]))', text, re.IGNORECASE)
+    date = re.search(r'(завтра|послезавтра|\d{1,2}[.\-/]\d{1,2}[.\-/]\d{2,4})', text)
     time_ = re.search(r'\b(\d{1,2}:\d{2})\b', text)
-    if time_:
-        result["Время"] = time_.group(1)
+    phone = re.search(r'(\+?\d{7,15})', text)
 
-    date_match = re.search(r'(сегодня|завтра|послезавтра|\d{1,2}[.\-/]\d{1,2}[.\-/]\d{2,4})', lower)
-    if date_match:
-        raw = date_match.group(1)
-        base = datetime(2025, 5, 21)  # Тестовая дата
-        if "сегодня" in raw:
-            result["Дата"] = base.strftime("%d.%m.%Y")
-        elif "завтра" in raw:
-            result["Дата"] = (base + timedelta(days=1)).strftime("%d.%m.%Y")
-        elif "послезавтра" in raw:
-            result["Дата"] = (base + timedelta(days=2)).strftime("%d.%m.%Y")
+    date_str = None
+    if date:
+        d = date.group(1)
+        if "завтра" in d:
+            date_str = (datetime.now() + timedelta(days=1)).strftime("%d.%m.%Y")
+        elif "послезавтра" in d:
+            date_str = (datetime.now() + timedelta(days=2)).strftime("%d.%m.%Y")
         else:
-            result["Дата"] = raw.replace("-", ".").replace("/", ".")
+            date_str = d
 
-    for key, value in SERVICE_DICT.items():
-        for synonym in value["ключи"]:
-            if synonym.lower() in lower:
-                result["Услуга"] = value["название"] + " — " + value["цена"]
-                return result
-
-    return result
+    return {
+        "Имя": name.group(2) if name else None,
+        "Услуга": serv.group(2).strip().capitalize() if serv else None,
+        "Дата": date_str,
+        "Время": time_.group(1) if time_ else None,
+        "Телефон": phone.group(1) if phone else None,
+    }
 
 # Хендлер сообщений
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -86,10 +73,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             form[k] = v
     user_data["form"] = form
 
-    messages = [{
-        "role": "system",
-        "content": "Ты — вежливая помощница стоматологической клиники. Отвечай только по услугам из предоставленного списка. Не выдумывай услуги. Уточни, если не хватает имя, услугу, дату, время, номер."
-    }] + history[-10:]
+    # GPT: для естественного диалога
+    messages = [
+        {
+            "role": "system",
+            "content": "Ты — вежливая помощница стоматологической клиники. "
+                       "Уточни, если чего-то не хватает: имя, услугу, дату, время и номер телефона."
+        }
+    ] + history[-10:]
 
     try:
         completion = openai.chat.completions.create(model="gpt-4o", messages=messages)
@@ -102,16 +93,33 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     history.append({"role": "assistant", "content": reply})
     user_data["history"] = history[-20:]
 
+    # Если форма полная — пишем в таблицу и шлём врачам
     required = ("Имя", "Услуга", "Дата", "Время", "Телефон")
     if all(form.get(k) for k in required):
         now = datetime.now().strftime("%d.%m.%Y %H:%M")
         row = [form["Имя"], form["Телефон"], form["Услуга"], form["Дата"], form["Время"], now]
         sheet.append_row(row)
+
+        # Шаблон для группы врачей
+        doctors_msg = (
+            f"🦷 *Новая запись пациента!*\n"
+            f"Имя: {form['Имя']}\n"
+            f"Телефон: {form['Телефон']}\n"
+            f"Услуга: {form['Услуга']}\n"
+            f"Дата: {form['Дата']}\n"
+            f"Время: {form['Время']}"
+        )
+        # Отправка в группу врачей
+        await context.bot.send_message(
+            chat_id=DOCTORS_GROUP_ID,
+            text=doctors_msg,
+            parse_mode="Markdown"
+        )
+
         await update.message.reply_text("✅ Вы успешно записаны! Спасибо 😊")
         user_data["form"] = {}
 
 # Запуск
-
 def main():
     print("🚀 Бот запущен")
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
