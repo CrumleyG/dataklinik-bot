@@ -125,14 +125,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     user_data = context.user_data
 
-    # 1. Если идёт запись, НЕ показываем справку по услуге
+    # 1. Проверяем, не консультация ли по услугам (справка)
     booking_intent = is_booking_intent(text)
     service_reply = get_service_info(text, for_booking=booking_intent)
     if service_reply:
         await update.message.reply_text(service_reply, parse_mode="Markdown")
         return
 
-    # 2. Всегда обновляем форму
+    # 2. Обновляем форму данными из сообщения пользователя
     form = user_data.get("form", {})
     extracted = extract_fields(text)
     for k, v in extracted.items():
@@ -140,8 +140,37 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             form[k] = v
     user_data["form"] = form
 
-    # 3. Если форма заполнена — сразу пишем в таблицу и врачам!
-    if is_form_complete(form):
+    # 3. История для OpenAI
+    history = user_data.get("history", [])
+    history.append({"role": "user", "content": text})
+    user_data["history"] = history[-20:]
+
+    # 4. Генерируем ответ ассистента
+    messages = [
+        {
+            "role": "system",
+            "content": "Ты — вежливая помощница стоматологической клиники. "
+                       "Если пользователь говорит 'записать', 'запишись', 'я хочу на услугу', 'записаться', 'на приём', 'на консультацию', то не отвечай справкой по услуге, а веди диалог записи. "
+                       "Тебе нужно последовательно узнать имя, услугу (название из списка клиники), дату, время, телефон."
+                       "Если услуга называется по-разному — спрашивай только из списка клиники (services.json)."
+                       "Не дублируй вопросы, если пользователь уже всё написал."
+        }
+    ] + history[-10:]
+
+    try:
+        completion = openai.chat.completions.create(model="gpt-4o", messages=messages)
+        reply = completion.choices[0].message.content
+    except Exception as e:
+        print("❌ OpenAI Error:", e)
+        return await update.message.reply_text("Ошибка при ответе от AI 😔")
+
+    await update.message.reply_text(reply)
+    history.append({"role": "assistant", "content": reply})
+    user_data["history"] = history[-20:]
+
+    # 5. КРИТИЧНО: после отправки ответа OpenAI — снова проверить, не стала ли форма полной!
+    required = ("Имя", "Услуга", "Дата", "Время", "Телефон")
+    if all(form.get(k) for k in required):
         now = datetime.now().strftime("%d.%m.%Y %H:%M")
         row = [form["Имя"], form["Телефон"], form["Услуга"], form["Дата"], form["Время"], now]
         sheet.append_row(row)
@@ -160,6 +189,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await update.message.reply_text("✅ Вы успешно записаны! Спасибо 😊")
         user_data["form"] = {}
+
         return
 
     # 4. Если форма НЕ заполнена, но человек пишет "всё верно" или "подтверждаю" — тоже пробуем записать (на случай, если поля не уловились с первого раза)
