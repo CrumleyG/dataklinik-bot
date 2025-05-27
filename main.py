@@ -287,9 +287,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(send_reminders, "cron", hour=9, minute=0, args=[app.job_queue])
-    scheduler.start()
+
+    # 📌 Добавляем напоминания после запуска event loop
+    async def start_scheduler(_: ContextTypes.DEFAULT_TYPE):
+        scheduler.add_job(send_reminders, "cron", hour=9, minute=0, args=[app.bot])
+        scheduler.start()
+
+    app.post_init = start_scheduler
+
     webhook = f"https://{RENDER_URL}/webhook"
     app.run_webhook(
         listen="0.0.0.0",
