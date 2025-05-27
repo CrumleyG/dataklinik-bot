@@ -39,16 +39,6 @@ with open("services.json", "r", encoding="utf-8") as f:
     SERVICES_DICT = json.load(f)
 SERVICES = list(SERVICES_DICT.values())
 
-# slots.json должна иметь структуру:
-# {
-#   "Консультация врача": ["09:00", "10:00", ...],
-#   "Рентген зуба": ["09:30", "11:00", ...],
-#   ...
-# }
-with open("slots.json", "r", encoding="utf-8") as f:
-    SLOTS_DICT = json.load(f)
-
-# Ключевые слова для разных сценариев
 CANCEL_KEYWORDS = ["отменить запись", "поменять время"]
 BOOKING_KEYWORDS = [
     "запис", "на приём", "appointment", "запишите", "хочу записаться"
@@ -70,7 +60,6 @@ def is_consult_intent(text):
 
 def match_service(text):
     q = text.lower()
-    # Цифровой выбор
     m = re.match(r"^\s*(\d+)\s*$", text)
     if m:
         idx = int(m.group(1)) - 1
@@ -92,21 +81,16 @@ def build_services_list():
     return "\n".join(lines)
 
 def extract_fields(text):
-    # минимальный парсинг: имя, услуга, дата, время, телефон
     data = {}
-    # Имя
     m = re.search(r"(?:зовут|я)\s+([А-ЯЁA-Z][а-яёa-z]+)", text)
     if m:
         data["Имя"] = m.group(1)
-    # Телефон
     m = re.search(r"(\+?\d{7,15})", text)
     if m:
         data["Телефон"] = m.group(1)
-    # Услуга
     svc = match_service(text)
     if svc:
         data["Услуга"] = svc
-    # Дата
     dm = re.search(r"(завтра|послезавтра|\d{1,2}[.\-/]\d{1,2}(?:[.\-/]\d{2,4})?)", text)
     if dm:
         d = dm.group(1)
@@ -116,22 +100,33 @@ def extract_fields(text):
             data["Дата"] = (datetime.now() + timedelta(days=2)).strftime("%d.%m.%Y")
         else:
             data["Дата"] = d
-    # Время
     tm = re.search(r"\b(\d{1,2}[:.]\d{2})\b", text)
     if tm:
         data["Время"] = tm.group(1).replace(".", ":")
     return data
 
 def is_form_complete(form):
-    return all(form.get(k) for k in ("Имя","Телефон","Услуга","Дата","Время"))
+    return all(form.get(k) for k in ("Имя", "Телефон", "Услуга", "Дата", "Время"))
+
+# --- Проверка занятых слотов ---
+def get_taken_slots(услуга, дата):
+    """
+    Вернуть список занятых времен для данной услуги и даты.
+    """
+    records = sheet.get_all_records()
+    taken = []
+    for rec in records:
+        if rec.get("Услуга", "").strip().lower() == услуга.strip().lower() and \
+           rec.get("Дата", "").strip() == дата.strip():
+            taken.append(rec.get("Время", "").strip())
+    return taken
 
 # --- Работа с записями в таблице ---
 def find_last_booking(chat_id):
-    """Вернуть (row_index, record_dict) или (None, None)"""
     records = sheet.get_all_records()
     last = None
     for idx, rec in enumerate(records, start=2):
-        if str(rec.get("ChatID","")) == str(chat_id):
+        if str(rec.get("ChatID", "")) == str(chat_id):
             last = (idx, rec)
     return last if last else (None, None)
 
@@ -148,7 +143,6 @@ async def register_and_notify(form, update: Update, context: ContextTypes.DEFAUL
         now_ts
     ]
     sheet.append_row(row)
-    # уведомление врачам
     msg = (
         f"🦷 *Новая запись!*\n"
         f"Имя: {form['Имя']}\n"
@@ -171,7 +165,6 @@ async def handle_cancel_or_edit(update: Update, context: ContextTypes.DEFAULT_TY
     # отмена
     if "отменить запись" in text:
         sheet.delete_row(row_idx)
-        # уведомить врача
         msg = (
             f"❌ Пациент отменил запись:\n"
             f"{rec['Имя']}, {rec['Услуга']} на {rec['Дата']} {rec['Время']}"
@@ -181,17 +174,31 @@ async def handle_cancel_or_edit(update: Update, context: ContextTypes.DEFAULT_TY
         return
     # поменять время
     svc = rec["Услуга"]
-    slots = SLOTS_DICT.get(svc, [])
+    date = rec["Дата"]
+    # Слоты услуги теперь берём из SERVICES_DICT
+    slots = SERVICES_DICT.get(svc.lower(), {}).get("слоты")
+    if not slots:
+        # Если не нашлось по ключу, попробуем по названию (на случай несоответствия регистров)
+        for key, s in SERVICES_DICT.items():
+            if s["название"].strip().lower() == svc.strip().lower():
+                slots = s.get("слоты", [])
+                break
     if not slots:
         await update.message.reply_text("К сожалению, для этой услуги нет информации о слотах.")
         return
-    # список слотов
+    # Получить занятые слоты
+    taken_slots = get_taken_slots(svc, date)
+    free_slots = [t for t in slots if t not in taken_slots or t == rec.get("Время")]
+    if not free_slots:
+        await update.message.reply_text("К сожалению, все слоты на этот день уже заняты.")
+        return
+    # список только свободных слотов
     text_slots = ["Выберите новый слот:"]
-    for i, t in enumerate(slots, 1):
+    for i, t in enumerate(free_slots, 1):
         text_slots.append(f"{i}. {t}")
     await update.message.reply_text("\n".join(text_slots))
     # сохранить состояние ожидания выбора слота
-    context.user_data["awaiting_slot"] = {"row": row_idx, "slots": slots, "record": rec}
+    context.user_data["awaiting_slot"] = {"row": row_idx, "slots": free_slots, "record": rec}
 
 # --- Обработка выбора слота ---
 async def handle_slot_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -207,10 +214,8 @@ async def handle_slot_selection(update: Update, context: ContextTypes.DEFAULT_TY
         return False
     new_time = slots[idx]
     row_idx = state["row"]
-    # предположим, что колонка "Время" — 6-я (A=1 ChatID; B=2 Имя; C=3 Телефон; D=4 Услуга; E=5 Дата; F=6 Время)
     sheet.update_cell(row_idx, 6, new_time)
     rec = state["record"]
-    # уведомления
     await update.message.reply_text(f"✅ Время изменено на {new_time}.")
     msg = (
         f"✏️ Пациент поменял время:\n"
@@ -218,7 +223,6 @@ async def handle_slot_selection(update: Update, context: ContextTypes.DEFAULT_TY
         f"Новая дата/время: {rec['Дата']} {new_time}"
     )
     await context.bot.send_message(DOCTORS_GROUP_ID, msg, parse_mode="Markdown")
-    # очистить состояние
     del context.user_data["awaiting_slot"]
     return True
 
@@ -240,30 +244,24 @@ async def send_reminders(context: ContextTypes.DEFAULT_TYPE):
 # --- Главное: хендлер и запуск ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
-    # 1. Отмена / изменение
     if is_cancel_intent(text):
         return await handle_cancel_or_edit(update, context)
-    # 2. Выбор слота после запроса изменения
     if context.user_data.get("awaiting_slot"):
         handled = await handle_slot_selection(update, context)
         if handled:
             return
-    # 3. Запрос списка услуг
     if is_consult_intent(text):
         return await update.message.reply_text(
             build_services_list(), parse_mode="Markdown"
         )
-    # 4. Сбор формы
     form = context.user_data.get("form", {})
     extracted = extract_fields(text)
     form.update(extracted)
     context.user_data["form"] = form
-    # 5. Полная форма — регистрация
     if is_form_complete(form):
         await register_and_notify(form, update, context)
         context.user_data["form"] = {}
         return
-    # 6. AI-дополнения
     history = context.user_data.get("history", [])
     history.append({"role": "user", "content": text})
     context.user_data["history"] = history[-20:]
@@ -281,7 +279,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(reply)
     history.append({"role": "assistant", "content": reply})
     context.user_data["history"] = history[-20:]
-    # ещё раз проверим
     form = context.user_data.get("form", {})
     if is_form_complete(form):
         await register_and_notify(form, update, context)
@@ -290,11 +287,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    # Настроим крон для напоминаний
     scheduler = AsyncIOScheduler()
     scheduler.add_job(send_reminders, "cron", hour=9, minute=0, args=[app.job_queue])
     scheduler.start()
-    # Запуск вебхука
     webhook = f"https://{RENDER_URL}/webhook"
     app.run_webhook(
         listen="0.0.0.0",
