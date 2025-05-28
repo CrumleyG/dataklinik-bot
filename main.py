@@ -82,11 +82,24 @@ def build_services_list():
         lines.append(f"{i}. *{s['название']}* — {s['цена']}")
     return "\n".join(lines)
 
+# --- Новый гибкий парсер ---
 def extract_fields(text):
     data = {}
-    m = re.search(r"(?:зовут|имя|я|меня)[\s:]*([А-ЯA-Z][а-яa-zё]+)", text, re.I)
-    if m:
-        data["Имя"] = m.group(1)
+
+    # --- Имя ---
+    # Находит "я Григорий", "меня зовут Олег", "Григорий" в начале или после любого слова
+    name_patterns = [
+        r"(?:я|имя|меня зовут|зовут)\s*[:,\-]?[\s]*([А-ЯЁA-Z][а-яёa-zA-Z]+)",
+        r"^\s*([А-ЯЁA-Z][а-яёa-zA-Z]+)\s*$"
+    ]
+    for pat in name_patterns:
+        m = re.search(pat, text, re.I)
+        if m:
+            data["Имя"] = m.group(1).capitalize()
+            break
+
+    # --- Телефон ---
+    # Любые формы, в том числе 8, +7, просто 10-11 цифр подряд
     m = re.search(r"(\+7\d{10}|8\d{10}|7\d{10}|\d{10,11})", text.replace(" ", ""))
     if m:
         phone = m.group(1)
@@ -95,19 +108,20 @@ def extract_fields(text):
         elif phone.startswith("7") and len(phone) == 11:
             phone = "+7" + phone[1:]
         data["Телефон"] = phone
+
+    # --- Услуга ---
     svc = match_service(text)
     if svc:
         data["Услуга"] = svc
+
+    # --- Дата ---
+    date_keywords = {"сегодня": 0, "завтра": 1, "послезавтра": 2}
     m = re.search(r"(сегодня|завтра|послезавтра|\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?)", text.lower())
     if m:
         d = m.group(1)
         now = datetime.now()
-        if d == "сегодня":
-            data["Дата"] = now.strftime("%d.%m.%Y")
-        elif d == "завтра":
-            data["Дата"] = (now + timedelta(days=1)).strftime("%d.%m.%Y")
-        elif d == "послезавтра":
-            data["Дата"] = (now + timedelta(days=2)).strftime("%d.%m.%Y")
+        if d in date_keywords:
+            data["Дата"] = (now + timedelta(days=date_keywords[d])).strftime("%d.%m.%Y")
         else:
             for fmt in ("%d.%m.%Y", "%d/%m/%Y", "%d-%m-%Y", "%d.%m", "%d/%m", "%d-%m"):
                 try:
@@ -120,15 +134,19 @@ def extract_fields(text):
                     continue
             else:
                 data["Дата"] = d
+
+    # --- Время ---
     m = re.search(r"(\d{1,2})[:.\-](\d{2})", text)
     if m:
-        data["Время"] = f"{int(m.group(1)):02d}:{m.group(2)}"
+        h, m_ = int(m.group(1)), m.group(2)
+        if 0 <= h <= 23 and 0 <= int(m_) <= 59:
+            data["Время"] = f"{h:02d}:{m_}"
+
     return data
 
 def is_form_complete(form):
     return all(form.get(k) for k in ("Имя", "Телефон", "Услуга", "Дата", "Время"))
 
-# --- ИСПРАВЛЕННАЯ ФУНКЦИЯ (обработка int/str) ---
 def get_taken_slots(услуга, дата):
     records = sheet.get_all_records()
     taken = []
@@ -262,18 +280,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_consult_intent(text):
         return await update.message.reply_text(build_services_list(), parse_mode="Markdown")
 
+    # --- Универсальный порядок: парсим всё из любого сообщения ---
     form = context.user_data.get("form", {})
     extracted = extract_fields(text)
-    form.update(extracted)
+    for k, v in extracted.items():
+        if v and (not form.get(k) or form.get(k).lower() != v.lower()):
+            form[k] = v
     context.user_data["form"] = form
 
+    # Только спрашиваем недостающее — порядок любой
+    # 1. Нет услуги
     if not form.get("Услуга"):
         await update.message.reply_text("Пожалуйста, выберите услугу из списка:\n\n" + build_services_list(), parse_mode="Markdown")
         return
+    # 2. Нет даты
     if not form.get("Дата"):
         await update.message.reply_text("На какую дату вы хотите записаться? (например: завтра, 24.05, послезавтра)")
         return
-
+    # 3. Нет времени
     if not form.get("Время"):
         svc = form["Услуга"]
         slots = []
@@ -291,6 +315,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["awaiting_time"] = {"slots": free_slots}
         return
 
+    # 4. Если ждём времени — записываем в форму при выборе
     if context.user_data.get("awaiting_time"):
         slots = context.user_data["awaiting_time"]["slots"]
         value = text.strip()
@@ -310,13 +335,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Пожалуйста, выберите время из списка (номер или время).")
             return
 
+    # 5. Нет телефона
     if not form.get("Телефон"):
         await update.message.reply_text("Пожалуйста, напишите ваш номер телефона.")
         return
+    # 6. Нет имени
     if not form.get("Имя"):
         await update.message.reply_text("Пожалуйста, напишите ваше имя.")
         return
 
+    # 7. Проверяем слоты и записываем
     if is_form_complete(form):
         taken_slots = get_taken_slots(form["Услуга"], form["Дата"])
         if form["Время"] in taken_slots:
@@ -328,7 +356,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["form"] = {}
         return
 
-    # --- Вот тут интеграция роли OpenAI ---
+    # Если не хватает чего-то и не разобрались — подключаем ИИ-администратора для помощи:
     history = context.user_data.get("history", [])
     history.append({"role": "user", "content": text})
     context.user_data["history"] = history[-20:]
