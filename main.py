@@ -110,9 +110,6 @@ def is_form_complete(form):
 
 # --- Проверка занятых слотов ---
 def get_taken_slots(услуга, дата):
-    """
-    Вернуть список занятых времен для данной услуги и даты.
-    """
     records = sheet.get_all_records()
     taken = []
     for rec in records:
@@ -175,10 +172,8 @@ async def handle_cancel_or_edit(update: Update, context: ContextTypes.DEFAULT_TY
     # поменять время
     svc = rec["Услуга"]
     date = rec["Дата"]
-    # Слоты услуги теперь берём из SERVICES_DICT
     slots = SERVICES_DICT.get(svc.lower(), {}).get("слоты")
     if not slots:
-        # Если не нашлось по ключу, попробуем по названию (на случай несоответствия регистров)
         for key, s in SERVICES_DICT.items():
             if s["название"].strip().lower() == svc.strip().lower():
                 slots = s.get("слоты", [])
@@ -186,18 +181,15 @@ async def handle_cancel_or_edit(update: Update, context: ContextTypes.DEFAULT_TY
     if not slots:
         await update.message.reply_text("К сожалению, для этой услуги нет информации о слотах.")
         return
-    # Получить занятые слоты
     taken_slots = get_taken_slots(svc, date)
     free_slots = [t for t in slots if t not in taken_slots or t == rec.get("Время")]
     if not free_slots:
         await update.message.reply_text("К сожалению, все слоты на этот день уже заняты.")
         return
-    # список только свободных слотов
     text_slots = ["Выберите новый слот:"]
     for i, t in enumerate(free_slots, 1):
         text_slots.append(f"{i}. {t}")
     await update.message.reply_text("\n".join(text_slots))
-    # сохранить состояние ожидания выбора слота
     context.user_data["awaiting_slot"] = {"row": row_idx, "slots": free_slots, "record": rec}
 
 # --- Обработка выбора слота ---
@@ -290,15 +282,22 @@ def main():
 
     scheduler = AsyncIOScheduler()
 
-    # 📌 Добавляем напоминания после запуска event loop
     async def start_scheduler(_: ContextTypes.DEFAULT_TYPE):
         scheduler.add_job(send_reminders, "cron", hour=9, minute=0, args=[app.bot])
         scheduler.start()
 
     app.post_init = start_scheduler
 
-    RENDER_URL = os.getenv("RENDER_URL", "").strip()
+    # --- Исправление webhook ---
+    RENDER_URL = os.getenv("RENDER_EXTERNAL_URL", "").strip()
+    if RENDER_URL.startswith("https://"):
+        RENDER_URL = RENDER_URL.replace("https://", "")
+    if RENDER_URL.startswith("http://"):
+        RENDER_URL = RENDER_URL.replace("http://", "")
+    if RENDER_URL.endswith("/"):
+        RENDER_URL = RENDER_URL.rstrip("/")
     webhook = f"https://{RENDER_URL}/webhook"
+
     app.run_webhook(
         listen="0.0.0.0",
         port=PORT,
