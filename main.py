@@ -128,13 +128,16 @@ def extract_fields(text):
 def is_form_complete(form):
     return all(form.get(k) for k in ("Имя", "Телефон", "Услуга", "Дата", "Время"))
 
+# --- ИСПРАВЛЕННАЯ ФУНКЦИЯ (обработка int/str) ---
 def get_taken_slots(услуга, дата):
     records = sheet.get_all_records()
     taken = []
     for rec in records:
-        if rec.get("Услуга", "").strip().lower() == услуга.strip().lower() and \
-           rec.get("Дата", "").strip() == дата.strip():
-            taken.append(rec.get("Время", "").strip())
+        usluga_cell = str(rec.get("Услуга", "")).strip().lower()
+        date_cell = str(rec.get("Дата", "")).strip()
+        if usluga_cell == услуга.strip().lower() and date_cell == дата.strip():
+            time_cell = str(rec.get("Время", "")).strip()
+            taken.append(time_cell)
     return taken
 
 def find_last_booking(chat_id):
