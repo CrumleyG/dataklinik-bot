@@ -297,6 +297,7 @@ def main():
 
     app.post_init = start_scheduler
 
+    RENDER_URL = os.getenv("RENDER_URL", "").strip()
     webhook = f"https://{RENDER_URL}/webhook"
     app.run_webhook(
         listen="0.0.0.0",
