@@ -64,7 +64,7 @@ def match_service(text):
         idx = int(m.group(1)) - 1
         if 0 <= idx < len(SERVICES):
             return SERVICES[idx]["название"]
-    # По ключевым словам и синонимам
+    # По ключевым словам, названию и их частям
     for key, s in SERVICES_DICT.items():
         if s["название"].lower() in q:
             return s["название"]
@@ -81,7 +81,7 @@ def build_services_list():
 
 def extract_fields(text):
     data = {}
-    # --- Имя: не из "Меня интересует", "Меня беспокоит" и т.п. ---
+    # Имя: не из "Меня интересует", "Меня беспокоит" и т.п.
     m = re.search(r"(?:меня зовут|имя)\s*[:,\-]?[\s]*([А-ЯЁA-Z][а-яёa-zA-Z]+)", text, re.I)
     if m:
         data["Имя"] = m.group(1).capitalize()
@@ -92,8 +92,7 @@ def extract_fields(text):
         elif re.match(r"^\s*([А-ЯЁA-Z][а-яёa-zA-Z]+)\s*$", text, re.I):
             m2 = re.match(r"^\s*([А-ЯЁA-Z][а-яёa-zA-Z]+)\s*$", text, re.I)
             data["Имя"] = m2.group(1).capitalize()
-
-    # --- Телефон ---
+    # Телефон
     m = re.search(r"(\+7\d{10}|8\d{10}|7\d{10}|\d{10,11})", text.replace(" ", ""))
     if m:
         phone = m.group(1)
@@ -102,13 +101,11 @@ def extract_fields(text):
         elif phone.startswith("7") and len(phone) == 11:
             phone = "+7" + phone[1:]
         data["Телефон"] = phone
-
-    # --- Услуга ---
+    # Услуга
     svc = match_service(text)
     if svc:
         data["Услуга"] = svc
-
-    # --- Дата ---
+    # Дата
     date_keywords = {"сегодня": 0, "завтра": 1, "послезавтра": 2}
     m = re.search(r"(сегодня|завтра|послезавтра|\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?)", text.lower())
     if m:
@@ -128,24 +125,16 @@ def extract_fields(text):
                     continue
             else:
                 data["Дата"] = d
-
-    # --- Время ---
+    # Время
     m = re.search(r"(\d{1,2})[:.\-](\d{2})", text)
     if m:
         h, m_ = int(m.group(1)), m.group(2)
         if 0 <= h <= 23 and 0 <= int(m_) <= 59:
             data["Время"] = f"{h:02d}:{m_}"
-
     return data
 
 def is_form_complete(form):
     return all(form.get(k) for k in ("Имя", "Телефон", "Услуга", "Дата", "Время"))
-
-def get_service_slots(service_name):
-    for s in SERVICES_DICT.values():
-        if s["название"].strip().lower() == service_name.strip().lower():
-            return s.get("слоты", [])
-    return []
 
 def get_taken_slots(услуга, дата):
     records = sheet.get_all_records()
@@ -208,7 +197,11 @@ async def handle_cancel_or_edit(update: Update, context: ContextTypes.DEFAULT_TY
         return
     svc = rec["Услуга"]
     date = rec["Дата"]
-    slots = get_service_slots(svc)
+    slots = []
+    for key, s in SERVICES_DICT.items():
+        if s["название"].strip().lower() == svc.strip().lower():
+            slots = s.get("слоты", [])
+            break
     if not slots:
         await update.message.reply_text("Нет информации о слотах для этой услуги.")
         return
@@ -236,6 +229,7 @@ async def handle_slot_selection(update: Update, context: ContextTypes.DEFAULT_TY
         return False
     new_time = slots[idx]
     row_idx = state["row"]
+    # обновляем в Google Sheets
     sheet.update_cell(row_idx, 5, new_time)
     rec = state["record"]
     await update.message.reply_text(f"✅ Время изменено на {new_time}.")
@@ -308,7 +302,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if form.get("Услуга") and form.get("Дата") and not form.get("Время"):
         svc = form["Услуга"]
         date = form["Дата"]
-        slots = get_service_slots(svc)
+        slots = []
+        for key, s in SERVICES_DICT.items():
+            if s["название"].strip().lower() == svc.strip().lower():
+                slots = s.get("слоты", [])
+                break
         taken_slots = get_taken_slots(svc, date)
         free_slots = [t for t in slots if t not in taken_slots]
         if free_slots:
@@ -347,8 +345,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 3. Проверяем полную форму — финальная запись только если все поля есть и время валидное
     if is_form_complete(form):
         svc = form["Услуга"]
-        slots = get_service_slots(svc)
-        if form["Время"] not in slots:
+        slots = []
+        for key, s in SERVICES_DICT.items():
+            if s["название"].strip().lower() == svc.strip().lower():
+                slots = s.get("слоты", [])
+                break
+        if slots and form["Время"] not in slots:
             await update.message.reply_text(
                 f"Время {form['Время']} недоступно для услуги {svc}. Пожалуйста, выберите только из доступных слотов."
             )
