@@ -58,22 +58,19 @@ def is_consult_intent(text):
 
 def match_service(text):
     q = text.lower()
-    m = re.match(r"^\s*(\d+)\s*$", text)
+    # Сначала по номеру из списка
+    m = re.match(r"\b(\d{1,2})\b", q)
     if m:
         idx = int(m.group(1)) - 1
         if 0 <= idx < len(SERVICES):
             return SERVICES[idx]["название"]
+    # По ключевым словам и синонимам
     for key, s in SERVICES_DICT.items():
         if s["название"].lower() in q:
             return s["название"]
         for kw in s.get("ключи", []):
             if kw.lower() in q:
                 return s["название"]
-    for key, s in SERVICES_DICT.items():
-        for kw in [s["название"]] + s.get("ключи", []):
-            for w in kw.lower().split():
-                if w in q or q in w:
-                    return s["название"]
     return None
 
 def build_services_list():
@@ -84,19 +81,21 @@ def build_services_list():
 
 def extract_fields(text):
     data = {}
+    # --- Имя: ищем только осмысленные конструкции ---
+    # "меня зовут Иван", "меня зовут: Иван", "Я Иван" (только если далее нет "интересует", "беспокоит" и пр.)
+    # но не "Меня интересует", "Меня беспокоит", "Меня устраивает"
+    if re.search(r"(меня зовут|имя)\s*[:,\-]?[\s]*([А-ЯЁA-Z][а-яёa-zA-Z]+)", text, re.I):
+        m = re.search(r"(меня зовут|имя)\s*[:,\-]?[\s]*([А-ЯЁA-Z][а-яёa-zA-Z]+)", text, re.I)
+        data["Имя"] = m.group(2).capitalize()
+    elif re.match(r"^\s*я\s+([А-ЯЁA-Z][а-яёa-zA-Z]+)\b(?!\s+(интересует|беспокоит|устраивает))", text, re.I):
+        m = re.match(r"^\s*я\s+([А-ЯЁA-Z][а-яёa-zA-Z]+)", text, re.I)
+        data["Имя"] = m.group(1).capitalize()
+    elif re.match(r"^\s*([А-ЯЁA-Z][а-яёa-zA-Z]+)\s*$", text, re.I):
+        # Только если сообщение одно слово (возможно это имя)
+        m = re.match(r"^\s*([А-ЯЁA-Z][а-яёa-zA-Z]+)\s*$", text, re.I)
+        data["Имя"] = m.group(1).capitalize()
 
-    # Имя (очень гибко!)
-    name_patterns = [
-        r"(?:я|имя|меня зовут|зовут)\s*[:,\-]?[\s]*([А-ЯЁA-Z][а-яёa-zA-Z]+)",
-        r"^\s*([А-ЯЁA-Z][а-яёa-zA-Z]+)\s*$"
-    ]
-    for pat in name_patterns:
-        m = re.search(pat, text, re.I)
-        if m:
-            data["Имя"] = m.group(1).capitalize()
-            break
-
-    # Телефон
+    # --- Телефон ---
     m = re.search(r"(\+7\d{10}|8\d{10}|7\d{10}|\d{10,11})", text.replace(" ", ""))
     if m:
         phone = m.group(1)
@@ -106,12 +105,12 @@ def extract_fields(text):
             phone = "+7" + phone[1:]
         data["Телефон"] = phone
 
-    # Услуга
+    # --- Услуга ---
     svc = match_service(text)
     if svc:
         data["Услуга"] = svc
 
-    # Дата
+    # --- Дата ---
     date_keywords = {"сегодня": 0, "завтра": 1, "послезавтра": 2}
     m = re.search(r"(сегодня|завтра|послезавтра|\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?)", text.lower())
     if m:
@@ -132,7 +131,7 @@ def extract_fields(text):
             else:
                 data["Дата"] = d
 
-    # Время
+    # --- Время ---
     m = re.search(r"(\d{1,2})[:.\-](\d{2})", text)
     if m:
         h, m_ = int(m.group(1)), m.group(2)
@@ -237,6 +236,7 @@ async def handle_slot_selection(update: Update, context: ContextTypes.DEFAULT_TY
         return False
     new_time = slots[idx]
     row_idx = state["row"]
+    # обновляем в Google Sheets
     sheet.update_cell(row_idx, 5, new_time)
     rec = state["record"]
     await update.message.reply_text(f"✅ Время изменено на {new_time}.")
@@ -274,7 +274,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if handled:
             return
 
-    # -- Сохраняем историю для OpenAI --
+    # Сохраняем историю для OpenAI
     history = context.user_data.get("history", [])
     history.append({"role": "user", "content": text})
     context.user_data["history"] = history[-20:]
@@ -286,7 +286,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             form[k] = v
     context.user_data["form"] = form
 
-    # -- Если есть "Консультация" или просто интересуется услугами/ценами --
+    # Если вопрос о консультации (цены/услуги) — только информируем!
     if is_consult_intent(text):
         ai_instruction = (
             "Ты — внимательный и вежливый администратор клиники. "
@@ -305,9 +305,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["history"] = history[-20:]
         return
 
-    # -- AI-компаньон ведёт запись до конца, уточняет только недостающее --
+    # AI-компаньон ведёт запись до конца, уточняет только недостающее
     if not is_form_complete(form):
-        # Генерируем естественную подсказку на русском + даём системе актуальную форму
+        # Если услуга указана — предлагать только слоты для этой услуги!
+        slot_list_msg = ""
+        if form.get("Услуга") and form.get("Дата") and not form.get("Время"):
+            svc = form["Услуга"]
+            date = form["Дата"]
+            slots = []
+            for key, s in SERVICES_DICT.items():
+                if s["название"].strip().lower() == svc.strip().lower():
+                    slots = s.get("слоты", [])
+                    break
+            taken_slots = get_taken_slots(svc, date)
+            free_slots = [t for t in slots if t not in taken_slots]
+            if free_slots:
+                slot_texts = [f"{i+1}. {t}" for i, t in enumerate(free_slots)]
+                slot_list_msg = (
+                    "Свободные слоты на выбранную дату:\n" + "\n".join(slot_texts) +
+                    "\nНапишите номер или время (например: 2 или 12:00)."
+                )
+                context.user_data["awaiting_time"] = {"slots": free_slots}
+            else:
+                slot_list_msg = "На эту дату нет свободных слотов. Попробуйте другую дату или услугу."
+
+        # Генерируем естественную подсказку
         form_state = (
             f"Имя: {form.get('Имя', '—')}\n"
             f"Телефон: {form.get('Телефон', '—')}\n"
@@ -321,7 +343,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Разрешается реагировать на вопросы про услуги и цены, объяснять и предлагать. "
             "Если всё есть — подтверди запись. Не проси одно и то же по 10 раз.\n"
             "Текущие данные клиента:\n" + form_state +
-            "Вот список услуг:\n" + build_services_list()
+            "Вот список услуг:\n" + build_services_list() +
+            ("\n" + slot_list_msg if slot_list_msg else "")
         )
         msgs = [{"role": "system", "content": prompt}] + history[-10:]
         try:
@@ -334,7 +357,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["history"] = history[-20:]
         return
 
-    # -- Проверка и финальная запись через Python (таблица и уведомления!) --
+    # 4. Если ждём времени — записываем в форму при выборе
+    if context.user_data.get("awaiting_time"):
+        slots = context.user_data["awaiting_time"]["slots"]
+        value = text.strip()
+        slot_num = None
+        if re.fullmatch(r"\d+", value):
+            slot_num = int(value) - 1
+            if 0 <= slot_num < len(slots):
+                form["Время"] = slots[slot_num]
+        else:
+            for t in slots:
+                if value in t:
+                    form["Время"] = t
+        context.user_data["form"] = form
+        if form.get("Время"):
+            del context.user_data["awaiting_time"]
+        else:
+            await update.message.reply_text("Пожалуйста, выберите время из списка (номер или время).")
+            return
+
+    # Проверяем слоты и записываем
     taken_slots = get_taken_slots(form["Услуга"], form["Дата"])
     if form["Время"] in taken_slots:
         await update.message.reply_text("Этот слот уже занят. Выберите другое время.")
