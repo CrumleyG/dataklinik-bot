@@ -277,10 +277,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if handled:
             return
 
-    if is_consult_intent(text):
-        return await update.message.reply_text(build_services_list(), parse_mode="Markdown")
-
-    # --- Универсальный порядок: парсим всё из любого сообщения ---
+    # --- Форма: собираем кусками из любого сообщения
     form = context.user_data.get("form", {})
     extracted = extract_fields(text)
     for k, v in extracted.items():
@@ -288,34 +285,95 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             form[k] = v
     context.user_data["form"] = form
 
-    # Только спрашиваем недостающее — порядок любой
-    # 1. Нет услуги
-    if not form.get("Услуга"):
-        await update.message.reply_text("Пожалуйста, выберите услугу из списка:\n\n" + build_services_list(), parse_mode="Markdown")
-        return
-    # 2. Нет даты
-    if not form.get("Дата"):
-        await update.message.reply_text("На какую дату вы хотите записаться? (например: завтра, 24.05, послезавтра)")
-        return
-    # 3. Нет времени
-    if not form.get("Время"):
-        svc = form["Услуга"]
-        slots = []
-        for key, s in SERVICES_DICT.items():
-            if s["название"].strip().lower() == svc.strip().lower():
-                slots = s.get("слоты", [])
-                break
-        taken_slots = get_taken_slots(svc, form["Дата"])
-        free_slots = [t for t in slots if t not in taken_slots]
-        if not free_slots:
-            await update.message.reply_text("На эту дату нет свободных слотов. Попробуйте выбрать другую дату.")
-            return
-        slot_texts = [f"{i+1}. {t}" for i, t in enumerate(free_slots)]
-        await update.message.reply_text("Свободные слоты:\n" + "\n".join(slot_texts) + "\nНапишите номер или время (например: 2 или 12:00).")
-        context.user_data["awaiting_time"] = {"slots": free_slots}
+    # Если только консультируют — не заставляем записываться
+    if is_consult_intent(text):
+        await update.message.reply_text(build_services_list(), parse_mode="Markdown")
         return
 
-    # 4. Если ждём времени — записываем в форму при выборе
+    # Если спрашивают про конкретную услугу, но не запись
+    if form.get("Услуга") and not is_booking_intent(text) and not is_form_complete(form):
+        svc_key = None
+        # Определим ключ для ответа о цене
+        for key, s in SERVICES_DICT.items():
+            if s["название"] == form["Услуга"]:
+                svc_key = key
+                break
+        if svc_key:
+            price = SERVICES_DICT[svc_key].get("цена")
+            await update.message.reply_text(
+                f"Цена услуги *{form['Услуга']}*: {price}", parse_mode="Markdown"
+            )
+        # Если у пользователя не явное намерение записаться, просто проконсультировать — не ведём дальше
+        if not is_booking_intent(text):
+            return
+
+    # Гибкая сборка — уточняем только недостающее
+    missing = []
+    if not form.get("Услуга"):
+        missing.append("услугу")
+    if not form.get("Дата"):
+        missing.append("дату")
+    if not form.get("Время"):
+        missing.append("время")
+    if not form.get("Телефон"):
+        missing.append("номер телефона")
+    if not form.get("Имя"):
+        missing.append("имя")
+
+    # Динамический диалог — AI сопровождает до конца сбора всех данных
+    if missing:
+        # Предлагаем выбор слотов, если не хватает только времени
+        if "услугу" not in missing and "дату" not in missing and "время" in missing:
+            svc = form["Услуга"]
+            slots = []
+            for key, s in SERVICES_DICT.items():
+                if s["название"].strip().lower() == svc.strip().lower():
+                    slots = s.get("слоты", [])
+                    break
+            taken_slots = get_taken_slots(svc, form["Дата"])
+            free_slots = [t for t in slots if t not in taken_slots]
+            if free_slots:
+                slot_texts = [f"{i+1}. {t}" for i, t in enumerate(free_slots)]
+                await update.message.reply_text(
+                    "Свободные слоты:\n" + "\n".join(slot_texts) + "\nНапишите номер или время (например: 2 или 12:00)."
+                )
+                context.user_data["awaiting_time"] = {"slots": free_slots}
+                return
+            else:
+                await update.message.reply_text("На эту дату нет свободных слотов. Попробуйте выбрать другую дату.")
+                return
+
+        # AI-админ ведёт диалог — максимально естественно, пока форма не соберётся
+        history = context.user_data.get("history", [])
+        history.append({"role": "user", "content": text})
+        context.user_data["history"] = history[-20:]
+
+        # В систему ИИ отправляем, какие поля уже известны (чтобы не спрашивал заново)
+        known = [f"{k}: {v}" for k, v in form.items() if v]
+        ai_system = (
+            "Ты — вежливая, доброжелательная девушка-администратор стоматологической клиники, тебе 25 лет. "
+            "Общайся как живой человек — тепло, легко, короткими фразами. "
+            "Помогаешь записаться на приём и рассказываешь только про услуги из этого списка:\n"
+            + build_services_list() +
+            f"\nНа данный момент пользователь уже указал: {', '.join(known) if known else 'пока ничего'}.\n"
+            f"Тебе нужно уточнить только: {', '.join(missing)}.\n"
+            "Если клиент спрашивает про цены, услуги, расписание — объясняй понятно и не веди сразу к записи. "
+            "Никогда не придумывай услуги и не обещай то, чего нет. "
+            "Всегда сопровождай до конца, пока не получишь все данные. "
+            "Примерно как опытный админ: не перебивай, не дави, спрашивай только то, чего не хватает, и объясняй всё по-человечески."
+        )
+        msgs = [{"role": "system", "content": ai_system}] + history[-10:]
+        try:
+            resp = openai.chat.completions.create(model="gpt-4o", messages=msgs)
+            reply = resp.choices[0].message.content
+        except Exception:
+            reply = "Извините, что-то пошло не так. Попробуйте ещё раз 🤖"
+        await update.message.reply_text(reply)
+        history.append({"role": "assistant", "content": reply})
+        context.user_data["history"] = history[-20:]
+        return
+
+    # Если ждём время — пользователь ввёл слот (обработка как было)
     if context.user_data.get("awaiting_time"):
         slots = context.user_data["awaiting_time"]["slots"]
         value = text.strip()
@@ -335,16 +393,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Пожалуйста, выберите время из списка (номер или время).")
             return
 
-    # 5. Нет телефона
-    if not form.get("Телефон"):
-        await update.message.reply_text("Пожалуйста, напишите ваш номер телефона.")
-        return
-    # 6. Нет имени
-    if not form.get("Имя"):
-        await update.message.reply_text("Пожалуйста, напишите ваше имя.")
-        return
-
-    # 7. Проверяем слоты и записываем
+    # Проверяем: если всё есть — финализируем!
     if is_form_complete(form):
         taken_slots = get_taken_slots(form["Услуга"], form["Дата"])
         if form["Время"] in taken_slots:
@@ -356,29 +405,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["form"] = {}
         return
 
-    # Если не хватает чего-то и не разобрались — подключаем ИИ-администратора для помощи:
-    history = context.user_data.get("history", [])
-    history.append({"role": "user", "content": text})
-    context.user_data["history"] = history[-20:]
-    ai_system = (
-        "Ты — вежливая, доброжелательная и внимательная девушка-администратор стоматологической клиники, тебе 25 лет. "
-        "Ты общаешься тепло, дружелюбно, короткими фразами, как живой человек. "
-        "Никогда не придумывай услуги и не пиши про несуществующее: работай только с этим списком услуг:\n"
-        + build_services_list() +
-        "\nТвоя задача — помочь клиенту записаться: собрать имя, телефон, услугу, дату и время. "
-        "Если не хватает чего-то — уточни именно это, не спрашивая лишнего. "
-        "Всё записывай кратко, без канцелярита и излишних фраз, с позитивным тоном. "
-        "Если клиент спрашивает не по теме, мягко вернись к записи."
-    )
-    msgs = [{"role": "system", "content": ai_system}] + history[-10:]
-    try:
-        resp = openai.chat.completions.create(model="gpt-4o", messages=msgs)
-        reply = resp.choices[0].message.content
-    except Exception:
-        reply = "Ошибка AI 🤖"
-    await update.message.reply_text(reply)
-    history.append({"role": "assistant", "content": reply})
-    context.user_data["history"] = history[-20:]
+    # Если не собрали все данные — AI продолжает вести диалог!
+    # (Этот кусок уже будет отработан в основной ветке выше)
 
 def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
