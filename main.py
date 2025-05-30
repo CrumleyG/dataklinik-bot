@@ -18,6 +18,7 @@ PORT = int(os.getenv("PORT", "10000").strip())
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 DOCTORS_GROUP_ID = -1002529967465
 
+# --- OpenAI ---
 openai = OpenAI(api_key=OPENAI_API_KEY)
 
 # --- Google Sheets ---
@@ -162,8 +163,8 @@ async def register_and_notify(form, update: Update, context: ContextTypes.DEFAUL
         form["Услуга"],
         form["Дата"],
         form["Время"],
-        now_ts,
-        chat_id
+        chat_id,
+        now_ts
     ]
     sheet.append_row(row)
     msg = (
@@ -272,10 +273,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # --- Главная логика заполнения формы ---
     form = context.user_data.get("form", {})
     extracted = extract_fields(text)
-    # Сохраняем услугу, если уже есть в форме (чтобы не терялась)
     if "Услуга" in form and not extracted.get("Услуга"):
         extracted["Услуга"] = form["Услуга"]
-    # Сохраняем только пустые или реально новые данные
     for k, v in extracted.items():
         if v and (not form.get(k) or form.get(k).lower() != v.lower()):
             form[k] = v
