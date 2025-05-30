@@ -275,7 +275,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # --- КОНСУЛЬТАЦИОННЫЙ РЕЖИМ ---
     if state == "consult":
-        # Прокидываем всё на OpenAI, если пользователь ещё не начал регистрацию
+        # --- 1. Сначала проверяем: хочет ли пользователь записаться? ---
+        if is_booking_intent(text):
+            service_candidate = match_service(text)
+            if service_candidate:
+                form["Услуга"] = service_candidate
+                user_data["form"] = form
+                user_data["state"] = "reg_name"
+                await update.message.reply_text("Пожалуйста, напишите ваше имя для записи.")
+                return
+            await update.message.reply_text("На какую услугу вы хотите записаться?\n" + build_services_list())
+            user_data["state"] = "reg_service"
+            user_data["form"] = form
+            return
+
+        # --- 2. Всё остальное: консультация через OpenAI ---
         services_text = []
         for i, s in enumerate(SERVICES, 1):
             line = f"{i}. {s['название']} — {s['цена']}"
@@ -294,7 +308,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Вот список услуг клиники:\n{services_prompt}"
         )
 
-        # История только последние 10 сообщений
         history = user_data.get("history", [])
         history.append({"role": "user", "content": text})
         user_data["history"] = history[-10:]
@@ -306,18 +319,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             reply = "Извините, сейчас не могу ответить 🤖"
         await update.message.reply_text(reply)
-        return
-
-        # Переход к записи (не трогаем)
-        if is_booking_intent(text):
-            # ... твоя логика регистрации ...
-            # (оставь как было)
-            return
-
-        # Базовое приветствие (если ни одно условие не сработало)
-        await update.message.reply_text(
-            "Здравствуйте! Чем могу помочь? Если хотите узнать об услугах или записаться — напишите."
-        )
         return
 
         # Если пользователь сразу пишет "записаться на ...", начни оформление
@@ -462,3 +463,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
