@@ -18,7 +18,6 @@ PORT = int(os.getenv("PORT", "10000").strip())
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 DOCTORS_GROUP_ID = -1002529967465
 
-# --- OpenAI ---
 openai = OpenAI(api_key=OPENAI_API_KEY)
 
 # --- Google Sheets ---
@@ -34,7 +33,6 @@ sheet = client.open_by_url(
     "https://docs.google.com/spreadsheets/d/1_w2CVitInb118oRGHgjsufuwsY4ks4H07aoJJMs_W5I/edit"
 ).sheet1
 
-# --- Услуги и слоты ---
 with open("services.json", "r", encoding="utf-8") as f:
     SERVICES_DICT = json.load(f)
 SERVICES = list(SERVICES_DICT.values())
@@ -80,7 +78,6 @@ def build_services_list():
 
 def extract_fields(text):
     data = {}
-    # Имя
     m = re.search(r"(?:меня зовут|имя)\s*[:,\-]?[\s]*([А-ЯЁA-Z][а-яёa-zA-Z]+)", text, re.I)
     if m:
         data["Имя"] = m.group(1).capitalize()
@@ -91,7 +88,6 @@ def extract_fields(text):
         elif re.match(r"^\s*([А-ЯЁA-Z][а-яёa-zA-Z]+)\s*$", text, re.I):
             m2 = re.match(r"^\s*([А-ЯЁA-Z][а-яёa-zA-Z]+)\s*$", text, re.I)
             data["Имя"] = m2.group(1).capitalize()
-    # Телефон
     m = re.search(r"(\+7\d{10}|8\d{10}|7\d{10}|\d{10,11})", text.replace(" ", ""))
     if m:
         phone = m.group(1)
@@ -100,11 +96,9 @@ def extract_fields(text):
         elif phone.startswith("7") and len(phone) == 11:
             phone = "+7" + phone[1:]
         data["Телефон"] = phone
-    # Услуга
     svc = match_service(text)
     if svc:
         data["Услуга"] = svc
-    # Дата
     date_keywords = {"сегодня": 0, "завтра": 1, "послезавтра": 2}
     m = re.search(r"(сегодня|завтра|послезавтра|\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?)", text.lower())
     if m:
@@ -124,7 +118,6 @@ def extract_fields(text):
                     continue
             else:
                 data["Дата"] = d
-    # Время
     m = re.search(r"(\d{1,2})[:.\-](\d{2})", text)
     if m:
         h, m_ = int(m.group(1)), m.group(2)
@@ -265,30 +258,138 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if handled:
             return
 
-    # Сохраняем историю для OpenAI
     history = context.user_data.get("history", [])
     history.append({"role": "user", "content": text})
     context.user_data["history"] = history[-20:]
 
-    # --- Главная логика заполнения формы ---
+    # 1. Первый этап — консультация (до тех пор, пока не заявлен явный intent "записаться")
+    state = context.user_data.get("state", "consult")
     form = context.user_data.get("form", {})
-    extracted = extract_fields(text)
-    if "Услуга" in form and not extracted.get("Услуга"):
-        extracted["Услуга"] = form["Услуга"]
-    for k, v in extracted.items():
-        if v and (not form.get(k) or form.get(k).lower() != v.lower()):
-            form[k] = v
-    context.user_data["form"] = form
 
-    # --- Проверка на консультацию ---
-    if is_consult_intent(text):
-        ai_instruction = (
-            "Ты — внимательный и вежливый администратор клиники. "
-            "Если клиент спрашивает только про цены, услуги или слоты — объясни это, не навязывай запись. "
-            "Отправь только нужную информацию, если человек не хочет записываться."
+    if state == "consult":
+        # Сначала — отвечаем на любые вопросы по услугам, без сбора данных!
+        if is_consult_intent(text) or not is_booking_intent(text):
+            ai_instruction = (
+                "Ты — заботливый, вежливый администратор стоматологии. "
+                "Пока клиент не сказал, что хочет записаться — просто консультируй, отвечай на вопросы про услуги и цены, не навязывай запись. "
+                "Вот список услуг:\n" + build_services_list()
+            )
+            msgs = [{"role": "system", "content": ai_instruction}] + history[-10:]
+            try:
+                resp = openai.chat.completions.create(model="gpt-4o", messages=msgs)
+                reply = resp.choices[0].message.content
+            except Exception:
+                reply = "Ошибка AI 🤖"
+            await update.message.reply_text(reply)
+            history.append({"role": "assistant", "content": reply})
+            context.user_data["history"] = history[-20:]
+            # Если заметил явный запрос на запись — переключаемся на режим записи
+            if is_booking_intent(text) or match_service(text):
+                context.user_data["state"] = "booking"
+                extracted = extract_fields(text)
+                form.update(extracted)
+                context.user_data["form"] = form
+            else:
+                return
+
+    # 2. Этап записи: начинаем собирать поля формы (Имя, Телефон, Услуга, Дата, Время)
+    if state == "booking" or context.user_data.get("state") == "booking":
+        extracted = extract_fields(text)
+        for k, v in extracted.items():
+            if v and (not form.get(k) or form.get(k).lower() != v.lower()):
+                form[k] = v
+        context.user_data["form"] = form
+        context.user_data["state"] = "booking"
+
+        # Слоты — предлагаем только когда выбраны услуга и дата
+        if form.get("Услуга") and form.get("Дата") and not form.get("Время"):
+            svc = form["Услуга"]
+            date = form["Дата"]
+            slots = []
+            for key, s in SERVICES_DICT.items():
+                if s["название"].strip().lower() == svc.strip().lower():
+                    slots = s.get("слоты", [])
+                    break
+            taken_slots = get_taken_slots(svc, date)
+            free_slots = [t for t in slots if t not in taken_slots]
+            if free_slots:
+                slot_texts = [f"{i+1}. {t}" for i, t in enumerate(free_slots)]
+                await update.message.reply_text(
+                    "Свободные слоты на выбранную дату:\n" +
+                    "\n".join(slot_texts) +
+                    "\nНапишите номер или время (например: 2 или 12:00)."
+                )
+                context.user_data["awaiting_time"] = {"slots": free_slots}
+                return
+            else:
+                await update.message.reply_text("На эту дату нет свободных слотов. Попробуйте другую дату или услугу.")
+                return
+
+        # Ожидание выбора слота времени
+        if context.user_data.get("awaiting_time"):
+            slots = context.user_data["awaiting_time"]["slots"]
+            value = text.strip()
+            slot_num = None
+            if re.fullmatch(r"\d+", value):
+                slot_num = int(value) - 1
+                if 0 <= slot_num < len(slots):
+                    form["Время"] = slots[slot_num]
+            else:
+                for t in slots:
+                    if value in t:
+                        form["Время"] = t
+            context.user_data["form"] = form
+            if form.get("Время"):
+                del context.user_data["awaiting_time"]
+            else:
+                await update.message.reply_text("Пожалуйста, выберите время из списка (номер или время).")
+                return
+
+        # Если всё собрано — валидируем, записываем, отправляем
+        if is_form_complete(form):
+            svc = form["Услуга"]
+            slots = []
+            for key, s in SERVICES_DICT.items():
+                if s["название"].strip().lower() == svc.strip().lower():
+                    slots = s.get("слоты", [])
+                    break
+            if slots and form["Время"] not in slots:
+                await update.message.reply_text(
+                    f"Время {form['Время']} недоступно для услуги {svc}. Пожалуйста, выберите только из доступных слотов."
+                )
+                form["Время"] = ""
+                context.user_data["form"] = form
+                return
+            taken_slots = get_taken_slots(form["Услуга"], form["Дата"])
+            if form["Время"] in taken_slots:
+                await update.message.reply_text("Этот слот уже занят. Выберите другое время.")
+                form["Время"] = ""
+                context.user_data["form"] = form
+                return
+            if not form.get("Имя"):
+                await update.message.reply_text("Пожалуйста, представьтесь — как к вам обращаться?")
+                return
+            await register_and_notify(form, update, context)
+            context.user_data["form"] = {}
+            context.user_data["state"] = "consult"
+            return
+
+        # AI-сопровождение — спрашивает только недостающие поля, не повторяется
+        form_state = (
+            f"Имя: {form.get('Имя', '—')}\n"
+            f"Телефон: {form.get('Телефон', '—')}\n"
+            f"Услуга: {form.get('Услуга', '—')}\n"
+            f"Дата: {form.get('Дата', '—')}\n"
+            f"Время: {form.get('Время', '—')}\n"
         )
-        ai_system = ai_instruction + "\nВот список услуг:\n" + build_services_list()
-        msgs = [{"role": "system", "content": ai_system}] + history[-10:]
+        prompt = (
+            "Ты — вежливый, живой администратор стоматологии. "
+            "Собери недостающие данные для записи, не навязывай и не повторяйся, веди себя дружелюбно. "
+            "Если клиент интересуется услугами — объясни, если уже всё введено — подтверди запись.\n"
+            "Текущие данные клиента:\n" + form_state +
+            "Вот список услуг:\n" + build_services_list()
+        )
+        msgs = [{"role": "system", "content": prompt}] + history[-10:]
         try:
             resp = openai.chat.completions.create(model="gpt-4o", messages=msgs)
             reply = resp.choices[0].message.content
@@ -297,110 +398,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(reply)
         history.append({"role": "assistant", "content": reply})
         context.user_data["history"] = history[-20:]
-        return
-
-    # 1. Если указана услуга и дата, но нет времени — предлагай только слоты этой услуги
-    if form.get("Услуга") and form.get("Дата") and not form.get("Время"):
-        svc = form["Услуга"]
-        date = form["Дата"]
-        slots = []
-        for key, s in SERVICES_DICT.items():
-            if s["название"].strip().lower() == svc.strip().lower():
-                slots = s.get("слоты", [])
-                break
-        taken_slots = get_taken_slots(svc, date)
-        free_slots = [t for t in slots if t not in taken_slots]
-        if free_slots:
-            slot_texts = [f"{i+1}. {t}" for i, t in enumerate(free_slots)]
-            await update.message.reply_text(
-                "Свободные слоты на выбранную дату:\n" +
-                "\n".join(slot_texts) +
-                "\nНапишите номер или время (например: 2 или 12:00)."
-            )
-            context.user_data["awaiting_time"] = {"slots": free_slots}
-            return
-        else:
-            await update.message.reply_text("На эту дату нет свободных слотов. Попробуйте другую дату или услугу.")
-            return
-
-    # 2. Если ожидаем время — пишем в форму и записываем
-    if context.user_data.get("awaiting_time"):
-        slots = context.user_data["awaiting_time"]["slots"]
-        value = text.strip()
-        slot_num = None
-        if re.fullmatch(r"\d+", value):
-            slot_num = int(value) - 1
-            if 0 <= slot_num < len(slots):
-                form["Время"] = slots[slot_num]
-        else:
-            for t in slots:
-                if value in t:
-                    form["Время"] = t
-        context.user_data["form"] = form
-        if form.get("Время"):
-            del context.user_data["awaiting_time"]
-        else:
-            await update.message.reply_text("Пожалуйста, выберите время из списка (номер или время).")
-            return
-
-    # 3. Проверяем полную форму — финальная запись только если все поля есть и время валидное
-    if is_form_complete(form):
-        svc = form["Услуга"]
-        slots = []
-        for key, s in SERVICES_DICT.items():
-            if s["название"].strip().lower() == svc.strip().lower():
-                slots = s.get("слоты", [])
-                break
-        if slots and form["Время"] not in slots:
-            await update.message.reply_text(
-                f"Время {form['Время']} недоступно для услуги {svc}. Пожалуйста, выберите только из доступных слотов."
-            )
-            form["Время"] = ""
-            context.user_data["form"] = form
-            return
-        taken_slots = get_taken_slots(form["Услуга"], form["Дата"])
-        if form["Время"] in taken_slots:
-            await update.message.reply_text("Этот слот уже занят. Выберите другое время.")
-            form["Время"] = ""
-            context.user_data["form"] = form
-            return
-        # --- ПРОВЕРКА ИМЕНИ ПЕРЕД ЗАПИСЬЮ ---
-        if not form.get("Имя"):
-            await update.message.reply_text("Пожалуйста, представьтесь — как к вам обращаться?")
-            return
-        await register_and_notify(form, update, context)
-        context.user_data["form"] = {}
-        return
-
-    # 4. Если чего-то не хватает — AI сопровождает до сбора всех данных
-    form_state = (
-        f"Имя: {form.get('Имя', '—')}\n"
-        f"Телефон: {form.get('Телефон', '—')}\n"
-        f"Услуга: {form.get('Услуга', '—')}\n"
-        f"Дата: {form.get('Дата', '—')}\n"
-        f"Время: {form.get('Время', '—')}\n"
-    )
-    # Добавляем явный запрос имени, если нет!
-    if not form.get("Имя"):
-        await update.message.reply_text("Пожалуйста, напишите ваше имя, чтобы мы могли вас записать 😊")
-        return
-    prompt = (
-        "Ты — вежливый, живой администратор клиники. "
-        "Если у клиента не хватает каких-то данных для записи (имя, телефон, услуга, дата, время) — уточни именно их, но дружелюбно, не строго по шагам. "
-        "Разрешается реагировать на вопросы про услуги и цены, объяснять и предлагать. "
-        "Если всё есть — подтверди запись. Не проси одно и то же по 10 раз.\n"
-        "Текущие данные клиента:\n" + form_state +
-        "Вот список услуг:\n" + build_services_list()
-    )
-    msgs = [{"role": "system", "content": prompt}] + history[-10:]
-    try:
-        resp = openai.chat.completions.create(model="gpt-4o", messages=msgs)
-        reply = resp.choices[0].message.content
-    except Exception:
-        reply = "Ошибка AI 🤖"
-    await update.message.reply_text(reply)
-    history.append({"role": "assistant", "content": reply})
-    context.user_data["history"] = history[-20:]
 
 def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
