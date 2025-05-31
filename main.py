@@ -150,9 +150,16 @@ def get_taken_slots(услуга, дата):
 
 def find_last_booking(chat_id):
     records = sheet.get_all_records()
+    # Список возможных названий столбца для Chat ID
+    id_keys = ["Chat ID", "chat_id", "Chat Id", "chatid", "id"]
     last = None
     for idx, rec in enumerate(records, start=2):
-        if str(rec.get("Chat ID", "")) == str(chat_id):
+        rec_chat_id = None
+        for key in id_keys:
+            if key in rec:
+                rec_chat_id = rec[key]
+                break
+        if rec_chat_id is not None and str(rec_chat_id).strip() == str(chat_id).strip():
             last = (idx, rec)
     return last if last else (None, None)
 
